@@ -75,6 +75,12 @@ function detectEnvironments(): AIEnvironment[] {
       detect: () => existsSync(join(home, ".claude")) || !!process.env.CLAUDE_CODE_VERSION
     },
     {
+      name: "codex",
+      skillPath: join(home, ".codex/commands/init-memory.md"),
+      hookPath: join(home, ".codex/hooks.json"),
+      detect: () => existsSync(join(home, ".codex"))
+    },
+    {
       name: "cursor",
       skillPath: join(home, ".cursor/commands/init-memory.md"),
       hookPath: join(home, ".cursor/settings.json"),
@@ -202,7 +208,50 @@ if __name__ == "__main__":
 `;
 }
 
-function generateHookConfig(): any {
+function generateHookConfig(envName: string): any {
+  // Codex uses .codex/hooks.json, different from other environments
+  if (envName === "codex") {
+    // Use 'python' on Windows, 'python3' on Unix
+    const pythonCmd = process.platform === "win32" ? "python" : "python3";
+    return {
+      hooks: {
+        SessionStart: [
+          {
+            matcher: "startup",
+            hooks: [
+              {
+                type: "command",
+                command: `${pythonCmd} -X utf8 .codex/hooks/session-start.py`,
+                timeout: 30
+              }
+            ]
+          },
+          {
+            matcher: "clear",
+            hooks: [
+              {
+                type: "command",
+                command: `${pythonCmd} -X utf8 .codex/hooks/session-start.py`,
+                timeout: 30
+              }
+            ]
+          },
+          {
+            matcher: "compact",
+            hooks: [
+              {
+                type: "command",
+                command: `${pythonCmd} -X utf8 .codex/hooks/session-start.py`,
+                timeout: 30
+              }
+            ]
+          }
+        ]
+      }
+    };
+  }
+
+  // Other environments use settings.json
   return {
     hooks: {
       SessionStart: [
@@ -321,7 +370,7 @@ function deployToEnvironment(
     if (includeHook) {
       try {
         // Deploy SessionStart hook script
-        const configDir = dirname(env.hookPath); // ~/.claude
+        const configDir = dirname(env.hookPath); // ~/.claude or ~/.codex
         const sessionStartPath = join(configDir, "hooks", "session-start.py");
         mkdirSync(dirname(sessionStartPath), { recursive: true });
         const sessionStartScript = generateHookScript(namespace);
@@ -329,7 +378,7 @@ function deployToEnvironment(
 
         // Deploy hook config (SessionStart only)
         mkdirSync(dirname(env.hookPath), { recursive: true });
-        const hookConfig = generateHookConfig();
+        const hookConfig = generateHookConfig(env.name);
         const merged = mergeHookConfig(env.hookPath, hookConfig);
         writeFileSync(env.hookPath, JSON.stringify(merged, null, 2), "utf-8");
 
