@@ -102,6 +102,77 @@ function detectEnvironments(): AIEnvironment[] {
   }));
 }
 
+function generateHookScript(namespace: string): string {
+  return `#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Session Start Hook - Auto-load memory
+"""
+import json
+import sys
+
+def main():
+    """Output hook result that triggers memory loading."""
+
+    context = """🎯 会话启动协议
+
+请立即调用以下工具加载记忆：
+
+mcp__xmszm-memory__load_session(namespace="${namespace}")
+
+这会加载所有触发记忆（身份、偏好、项目上下文等）。
+必须在第一次回复前执行。"""
+
+    result = {
+        "hookSpecificOutput": {
+            "hookEventName": "SessionStart",
+            "additionalContext": context,
+        }
+    }
+
+    print(json.dumps(result, ensure_ascii=False), flush=True)
+
+if __name__ == "__main__":
+    main()
+`;
+}
+
+function generateHookConfig(): any {
+  return {
+    hooks: {
+      SessionStart: [
+        {
+          matcher: "",
+          hooks: [
+            {
+              type: "command",
+              command: "python .claude/hooks/session-start.py",
+              timeout: 5
+            }
+          ]
+        }
+      ]
+    }
+  };
+}
+
+function mergeHookConfig(existingPath: string, newHook: any): any {
+  let existing: any = {};
+  if (existsSync(existingPath)) {
+    try {
+      existing = JSON.parse(readFileSync(existingPath, "utf-8"));
+    } catch {
+      existing = {};
+    }
+  }
+
+  const merged = { ...existing };
+  merged.hooks = merged.hooks || {};
+  merged.hooks.SessionStart = newHook.hooks.SessionStart;
+
+  return merged;
+}
+
 function generateSkillTemplate(namespace: string, version: string): string {
   return `# 初始化记忆
 
@@ -157,13 +228,36 @@ function deployToEnvironment(
     const skillContent = generateSkillTemplate(namespace, version);
     writeFileSync(env.skillPath, skillContent, "utf-8");
 
-    // 2. Hook 已废弃 - 技术限制无法实现
-    // Claude Code hook 只支持 type: "command"，无法注入上下文
-    // 用户需要手动 /init-memory 加载记忆
+    let hookMessage = "";
+
+    // 2. Deploy hook (SessionStart auto-loading)
+    if (includeHook) {
+      try {
+        // Deploy hook script
+        const hookScriptPath = join(dirname(env.hookPath), "..", "hooks", "session-start.py");
+        mkdirSync(dirname(hookScriptPath), { recursive: true });
+        const hookScript = generateHookScript(namespace);
+        writeFileSync(hookScriptPath, hookScript, "utf-8");
+
+        // Deploy hook config
+        mkdirSync(dirname(env.hookPath), { recursive: true });
+        const hookConfig = generateHookConfig();
+        const merged = mergeHookConfig(env.hookPath, hookConfig);
+        writeFileSync(env.hookPath, JSON.stringify(merged, null, 2), "utf-8");
+
+        hookMessage = " + auto-load hook";
+      } catch (hookErr: any) {
+        return {
+          success: true,
+          message: `⚠️ ${env.name}: skill 已部署，但 hook 部署失败`,
+          error: hookErr.message
+        };
+      }
+    }
 
     return {
       success: true,
-      message: `✅ ${env.name}: skill 已部署 (使用 /init-memory 加载记忆)`
+      message: `✅ ${env.name}: skill${hookMessage} 已部署`
     };
   } catch (err: any) {
     if (err.code === "EACCES") {
@@ -284,7 +378,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     },
     {
       name: "init",
-      description: "初始化记忆系统：自动部署 /init-memory skill 到当前或指定的 AI 环境。一次配置，跨环境可用。",
+      description: "初始化记忆系统：自动部署 /init-memory skill 和 SessionStart hook 到当前或指定的 AI 环境。一次配置，自动加载。",
       inputSchema: {
         type: "object",
         properties: {
@@ -296,6 +390,10 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
             type: "string",
             enum: ["auto", "claude-code", "cursor", "windsurf", "cline", "all"],
             description: "目标环境。auto=自动检测当前环境，all=部署到所有检测到的环境"
+          },
+          includeHook: {
+            type: "boolean",
+            description: "是否部署 SessionStart hook（自动加载记忆）。默认 true"
           }
         },
         required: ["namespace"]
@@ -448,7 +546,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     }
 
     case "init": {
-      const { namespace, target = "auto" } = args as any;
+      const { namespace, target = "auto", includeHook = true } = args as any;
       const version = "1.1.0"; // 从 package.json 读取更好，这里硬编码
 
       // 1. 检测所有环境
@@ -486,9 +584,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         targets = [found];
       }
 
-      // 3. 部署到目标环境（不再部署 hook）
+      // 3. 部署到目标环境
       const results = targets.map(env =>
-        deployToEnvironment(env, namespace, false, version)
+        deployToEnvironment(env, namespace, includeHook, version)
       );
 
       // 4. 生成报告
@@ -508,14 +606,12 @@ ${summary}
 
 📝 部署内容：
 • Skill 文件：/init-memory 命令
+${includeHook ? "• Hook 脚本：.claude/hooks/session-start.py" : ""}
+${includeHook ? "• Hook 配置：SessionStart 自动触发" : "• Hook 配置：未部署（需手动调用 /init-memory）"}
 
-🎯 使用方式：
-1. 每次新会话时，输入 /init-memory 加载记忆
-2. 或者在对话开始时说"请加载我的记忆"
-
-💡 提示：
-由于技术限制，无法自动加载记忆。
-但 /init-memory 命令非常简单快捷！
+🎯 下一步：
+${includeHook ? "1. 重启 AI 环境生效" : "1. 手动输入 /init-memory 加载记忆"}
+${includeHook ? "2. 新会话会自动加载命名空间 [${namespace}] 的记忆 ✨" : "2. 每次会话开始时手动加载记忆"}
 
 ✨ ${successCount}/${targets.length} 个环境部署成功${errorDetails}`;
 
@@ -600,7 +696,7 @@ async function autoInitIfNeeded() {
   const version = "1.1.0";
   const results: string[] = [];
 
-  // 部署到所有检测到的环境
+  // 部署到所有检测到的环境（包含 hook）
   for (const env of detected) {
     try {
       const result = deployToEnvironment(env, defaultNamespace, true, version);
