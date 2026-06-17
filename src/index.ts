@@ -322,7 +322,7 @@ function generateSkillTemplate(namespace: string, version: string): string {
 /init-memory
 \`\`\`
 
-或者直接说："请加载我的记忆"
+或者直接说:"请加载我的记忆"
 
 ## 功能
 
@@ -352,6 +352,57 @@ Version: ${version}
 `;
 }
 
+function generateMCPConfig(envName: string): any {
+  // Get the global package installation path
+  const packageName = "@xmszm/memory";
+
+  return {
+    mcpServers: {
+      "xmszm-memory": {
+        command: "npx",
+        args: ["-y", packageName]
+      }
+    }
+  };
+}
+
+function getMCPConfigPath(envName: string): string | null {
+  const home = homedir();
+
+  // Different environments may use different MCP config paths
+  switch (envName) {
+    case "codex":
+      return join(home, ".codex/mcp.json");
+    case "claude-code":
+      return join(home, ".claude/mcp.json");
+    case "cursor":
+      return join(home, ".cursor/mcp.json");
+    case "windsurf":
+      return join(home, ".windsurf/mcp.json");
+    case "cline":
+      return join(home, ".cline/mcp.json");
+    default:
+      return null;
+  }
+}
+
+function mergeMCPConfig(existingPath: string, newConfig: any): any {
+  let existing: any = {};
+  if (existsSync(existingPath)) {
+    try {
+      existing = JSON.parse(readFileSync(existingPath, "utf-8"));
+    } catch {
+      existing = {};
+    }
+  }
+
+  const merged = { ...existing };
+  merged.mcpServers = merged.mcpServers || {};
+  merged.mcpServers["xmszm-memory"] = newConfig.mcpServers["xmszm-memory"];
+
+  return merged;
+}
+
 function deployToEnvironment(
   env: AIEnvironment,
   namespace: string,
@@ -365,8 +416,24 @@ function deployToEnvironment(
     writeFileSync(env.skillPath, skillContent, "utf-8");
 
     let hookMessage = "";
+    let mcpMessage = "";
 
-    // 2. Deploy hook (SessionStart auto-loading only)
+    // 2. Deploy MCP config
+    const mcpConfigPath = getMCPConfigPath(env.name);
+    if (mcpConfigPath) {
+      try {
+        const mcpConfig = generateMCPConfig(env.name);
+        const merged = mergeMCPConfig(mcpConfigPath, mcpConfig);
+        mkdirSync(dirname(mcpConfigPath), { recursive: true });
+        writeFileSync(mcpConfigPath, JSON.stringify(merged, null, 2), "utf-8");
+        mcpMessage = " + mcp-config";
+      } catch (mcpErr: any) {
+        console.error(`[xmszm-memory] Warning: MCP config deployment failed for ${env.name}:`, mcpErr.message);
+        // Don't fail the whole deployment, just warn
+      }
+    }
+
+    // 3. Deploy hook (SessionStart auto-loading only)
     if (includeHook) {
       try {
         // Deploy SessionStart hook script
@@ -386,7 +453,7 @@ function deployToEnvironment(
       } catch (hookErr: any) {
         return {
           success: true,
-          message: `⚠️ ${env.name}: skill 已部署，但 hook 部署失败`,
+          message: `⚠️ ${env.name}: skill${mcpMessage} 已部署，但 hook 部署失败`,
           error: hookErr.message
         };
       }
@@ -394,7 +461,7 @@ function deployToEnvironment(
 
     return {
       success: true,
-      message: `✅ ${env.name}: skill${hookMessage} 已部署`
+      message: `✅ ${env.name}: skill${mcpMessage}${hookMessage} 已部署`
     };
   } catch (err: any) {
     if (err.code === "EACCES") {
