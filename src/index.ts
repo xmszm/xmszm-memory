@@ -192,18 +192,6 @@ function generateHookConfig(): any {
             }
           ]
         }
-      ],
-      Stop: [
-        {
-          matcher: "",
-          hooks: [
-            {
-              type: "command",
-              command: "python .claude/hooks/stop.py",
-              timeout: 10
-            }
-          ]
-        }
       ]
     }
   };
@@ -222,7 +210,8 @@ function mergeHookConfig(existingPath: string, newHook: any): any {
   const merged = { ...existing };
   merged.hooks = merged.hooks || {};
   merged.hooks.SessionStart = newHook.hooks.SessionStart;
-  merged.hooks.Stop = newHook.hooks.Stop;
+  // Remove Stop hook if it exists
+  delete merged.hooks.Stop;
 
   return merged;
 }
@@ -284,30 +273,23 @@ function deployToEnvironment(
 
     let hookMessage = "";
 
-    // 2. Deploy hook (SessionStart auto-loading + Stop save reminder)
+    // 2. Deploy hook (SessionStart auto-loading only)
     if (includeHook) {
       try {
         // Deploy SessionStart hook script
-        // env.hookPath = ~/.claude/settings.json
-        // hookScriptPath = ~/.claude/hooks/session-start.py
         const configDir = dirname(env.hookPath); // ~/.claude
         const sessionStartPath = join(configDir, "hooks", "session-start.py");
         mkdirSync(dirname(sessionStartPath), { recursive: true });
         const sessionStartScript = generateHookScript(namespace);
         writeFileSync(sessionStartPath, sessionStartScript, "utf-8");
 
-        // Deploy Stop hook script
-        const stopHookPath = join(configDir, "hooks", "stop.py");
-        const stopHookScript = generateStopHookScript(namespace);
-        writeFileSync(stopHookPath, stopHookScript, "utf-8");
-
-        // Deploy hook config
+        // Deploy hook config (SessionStart only)
         mkdirSync(dirname(env.hookPath), { recursive: true });
         const hookConfig = generateHookConfig();
         const merged = mergeHookConfig(env.hookPath, hookConfig);
         writeFileSync(env.hookPath, JSON.stringify(merged, null, 2), "utf-8");
 
-        hookMessage = " + auto-load hook + save-reminder hook";
+        hookMessage = " + auto-load hook";
       } catch (hookErr: any) {
         return {
           success: true,
@@ -669,13 +651,14 @@ ${summary}
 📝 部署内容：
 • Skill 文件：/init-memory 命令
 ${includeHook ? "• SessionStart Hook：会话开始时自动加载记忆" : ""}
-${includeHook ? "• Stop Hook：会话结束时提醒保存重要信息" : ""}
 ${includeHook ? "• Hook 配置：自动触发" : "• Hook 配置：未部署（需手动调用 /init-memory）"}
 
 🎯 工作流程：
 ${includeHook ? "1. 会话开始 → 自动加载记忆 ✨" : "1. 手动输入 /init-memory 加载记忆"}
-${includeHook ? "2. 对话进行中 → AI 主动保存重要信息" : "2. 手动保存记忆"}
-${includeHook ? "3. 会话结束 → AI 检查并保存遗漏信息 💾" : "3. 每次会话开始时手动加载记忆"}
+${includeHook ? "2. 对话进行中 → AI 主动保存重要信息 💾" : "2. 手动保存记忆"}
+
+💡 提示：
+AI 会在对话中主动识别并保存重要信息（偏好、决策、上下文等）
 
 ✨ ${successCount}/${targets.length} 个环境部署成功${errorDetails}`;
 
