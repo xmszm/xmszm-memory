@@ -56,6 +56,184 @@ function now(): string {
   return new Date().toISOString();
 }
 
+// ── Environment Detection & Deployment ────────────────
+interface AIEnvironment {
+  name: string;
+  detected: boolean;
+  skillPath: string;
+  hookPath: string;
+}
+
+function detectEnvironments(): AIEnvironment[] {
+  const home = homedir();
+
+  const environments = [
+    {
+      name: "claude-code",
+      skillPath: join(home, ".claude/commands/init-memory.md"),
+      hookPath: join(home, ".claude/settings.json"),
+      detect: () => existsSync(join(home, ".claude")) || !!process.env.CLAUDE_CODE_VERSION
+    },
+    {
+      name: "cursor",
+      skillPath: join(home, ".cursor/commands/init-memory.md"),
+      hookPath: join(home, ".cursor/settings.json"),
+      detect: () => existsSync(join(home, ".cursor"))
+    },
+    {
+      name: "windsurf",
+      skillPath: join(home, ".windsurf/commands/init-memory.md"),
+      hookPath: join(home, ".windsurf/settings.json"),
+      detect: () => existsSync(join(home, ".windsurf"))
+    },
+    {
+      name: "cline",
+      skillPath: join(home, ".cline/commands/init-memory.md"),
+      hookPath: join(home, ".cline/settings.json"),
+      detect: () => existsSync(join(home, ".cline"))
+    }
+  ];
+
+  return environments.map(env => ({
+    name: env.name,
+    detected: env.detect(),
+    skillPath: env.skillPath,
+    hookPath: env.hookPath
+  }));
+}
+
+function generateSkillTemplate(namespace: string, version: string): string {
+  return `# 初始化记忆
+
+🎯 **会话启动时加载用户记忆**
+
+## 自动执行
+
+调用单个工具即可加载所有触发记忆：
+
+\`\`\`
+mcp__xmszm-memory__load_session(namespace="${namespace}")
+\`\`\`
+
+## 返回内容
+
+- 所有带触发条件的记忆的完整内容
+- 身份设定、偏好、项目上下文等
+
+## 应用记忆
+
+根据返回内容确认：
+- ✅ 身份角色
+- ✅ 称呼方式
+- ✅ 工具偏好
+- ✅ 项目设定
+
+## 使用方式
+
+- **手动触发**：输入 \`/init-memory\`
+- **自动触发**：会话开始时通过 hook 自动执行（如果已启用）
+
+---
+Generated: ${new Date().toISOString()}
+Namespace: ${namespace}
+Version: ${version}
+`;
+}
+
+function generateHookConfig(namespace: string): any {
+  return {
+    hooks: {
+      ConversationStart: [
+        {
+          matcher: "",
+          hooks: [
+            {
+              type: "inject-context",
+              content: `🎯 会话启动协议\n\n立即调用：mcp__xmszm-memory__load_session(namespace="${namespace}")\n\n这会加载所有触发记忆。必须在第一次回复前执行。`,
+              location: "before-conversation"
+            }
+          ]
+        }
+      ]
+    }
+  };
+}
+
+function mergeHookConfig(existingPath: string, newHook: any): any {
+  let existing: any = {};
+  if (existsSync(existingPath)) {
+    try {
+      existing = JSON.parse(readFileSync(existingPath, "utf-8"));
+    } catch {
+      existing = {};
+    }
+  }
+
+  const merged = { ...existing };
+  merged.hooks = merged.hooks || {};
+  merged.hooks.ConversationStart = newHook.hooks.ConversationStart;
+
+  return merged;
+}
+
+function deployToEnvironment(
+  env: AIEnvironment,
+  namespace: string,
+  includeHook: boolean,
+  version: string
+): { success: boolean; message: string; error?: string } {
+  try {
+    // 1. Deploy skill
+    mkdirSync(dirname(env.skillPath), { recursive: true });
+    const skillContent = generateSkillTemplate(namespace, version);
+    writeFileSync(env.skillPath, skillContent, "utf-8");
+
+    let hookMessage = "";
+
+    // 2. Deploy hook (optional)
+    if (includeHook) {
+      try {
+        mkdirSync(dirname(env.hookPath), { recursive: true });
+        const hookConfig = generateHookConfig(namespace);
+        const merged = mergeHookConfig(env.hookPath, hookConfig);
+        writeFileSync(env.hookPath, JSON.stringify(merged, null, 2), "utf-8");
+        hookMessage = " + hook";
+      } catch (hookErr: any) {
+        return {
+          success: true,
+          message: `⚠️ ${env.name}: skill 已部署，但 hook 部署失败`,
+          error: hookErr.message
+        };
+      }
+    }
+
+    return {
+      success: true,
+      message: `✅ ${env.name}: skill${hookMessage} 已部署`
+    };
+  } catch (err: any) {
+    if (err.code === "EACCES") {
+      return {
+        success: false,
+        message: `❌ ${env.name}: 权限不足`,
+        error: "请检查文件权限"
+      };
+    }
+    if (err.code === "ENOSPC") {
+      return {
+        success: false,
+        message: `❌ ${env.name}: 磁盘空间不足`,
+        error: err.message
+      };
+    }
+    return {
+      success: false,
+      message: `❌ ${env.name}: ${err.message}`,
+      error: err.stack
+    };
+  }
+}
+
 // ── MCP Server ────────────────────────────────────────
 const server = new Server(
   { name: "xmszm-memory", version: "1.0.0" },
@@ -148,6 +326,29 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
       inputSchema: {
         type: "object",
         properties: {},
+      },
+    },
+    {
+      name: "init",
+      description: "初始化记忆系统：自动部署 skill 和 hook 配置到当前或指定的 AI 环境。一次配置，跨环境可用。",
+      inputSchema: {
+        type: "object",
+        properties: {
+          namespace: {
+            type: "string",
+            description: "用户命名空间，如 xmszm"
+          },
+          target: {
+            type: "string",
+            enum: ["auto", "claude-code", "cursor", "windsurf", "cline", "all"],
+            description: "目标环境。auto=自动检测当前环境，all=部署到所有检测到的环境"
+          },
+          includeHook: {
+            type: "boolean",
+            description: "是否同时部署 ConversationStart hook（自动加载记忆）。默认 true"
+          }
+        },
+        required: ["namespace"]
       },
     },
   ],
@@ -285,6 +486,80 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             text: names.length ? names.join("\n") : "还没有用户",
           },
         ],
+      };
+    }
+
+    case "init": {
+      const { namespace, target = "auto", includeHook = true } = args as any;
+      const version = "1.1.0"; // 从 package.json 读取更好，这里硬编码
+
+      // 1. 检测所有环境
+      const environments = detectEnvironments();
+      const detected = environments.filter(env => env.detected);
+
+      if (detected.length === 0) {
+        return {
+          content: [{
+            type: "text",
+            text: "❌ 未检测到支持的 AI 环境（Claude Code / Cursor / Windsurf / Cline）\n\n请确保至少安装了一个支持的 AI 环境。"
+          }]
+        };
+      }
+
+      // 2. 确定目标环境
+      let targets: AIEnvironment[] = [];
+
+      if (target === "all") {
+        targets = detected;
+      } else if (target === "auto") {
+        // 优先当前环境，否则第一个检测到的
+        targets = [detected[0]];
+      } else {
+        const found = detected.find(env => env.name === target);
+        if (!found) {
+          const detectedList = detected.map(e => `• ${e.name}`).join("\n");
+          return {
+            content: [{
+              type: "text",
+              text: `❌ 环境 ${target} 未检测到或不支持\n\n检测到的环境：\n${detectedList}`
+            }]
+          };
+        }
+        targets = [found];
+      }
+
+      // 3. 部署到目标环境
+      const results = targets.map(env =>
+        deployToEnvironment(env, namespace, includeHook, version)
+      );
+
+      // 4. 生成报告
+      const summary = results.map(r => r.message).join("\n");
+      const successCount = results.filter(r => r.success).length;
+      const hasErrors = results.some(r => r.error);
+
+      let errorDetails = "";
+      if (hasErrors) {
+        const errors = results.filter(r => r.error).map(r => `  ${r.error}`).join("\n");
+        errorDetails = `\n\n⚠️ 错误详情：\n${errors}`;
+      }
+
+      const report = `📦 记忆系统初始化完成
+
+${summary}
+
+📝 部署内容：
+• Skill 文件：/init-memory 命令
+${includeHook ? "• Hook 配置：ConversationStart 自动触发" : "• Hook 配置：未部署（需手动调用 /init-memory）"}
+
+🎯 下一步：
+${includeHook ? "1. 重启 AI 环境生效（新会话会自动加载记忆）" : "1. 手动输入 /init-memory 加载记忆"}
+2. 会话启动时将自动加载命名空间 [${namespace}] 的记忆
+
+✨ ${successCount}/${targets.length} 个环境部署成功${errorDetails}`;
+
+      return {
+        content: [{ type: "text", text: report }]
       };
     }
 

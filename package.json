@@ -1,6 +1,6 @@
 {
   "name": "@xmszm/memory",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Personal MCP memory server. Multi-user, file-backed, cross-platform. Each user gets an isolated namespace.",
   "type": "module",
   "main": "dist/index.js",
