@@ -1,13 +1,13 @@
-# xmszm-memory
+# memory
 
 Personal MCP memory server. Multi-user, file-backed, cross-platform.
 
-Each user gets an isolated namespace. Memories persist across sessions and AI clients. Replace `admin` with your namespace.
+Each user gets an isolated namespace. Memories persist across sessions within the namespace.
 
 ## Install
 
 ```bash
-npm install -g xmszm-memory
+npm install -g @xmszm/memory
 ```
 
 ## Usage
@@ -22,20 +22,15 @@ xmszm-memory
 
 ```bash
 xmszm-memory sse
-# defaults to http://0.0.0.0:8000
-
 xmszm-memory sse 3000
-# custom port
 ```
 
 ### Hermes Configuration
 
-Add to your Hermes MCP config:
-
 ```json
 {
   "mcpServers": {
-    "xmszm-memory": {
+    "@xmszm/memory": {
       "command": "xmszm-memory",
       "args": []
     }
@@ -55,7 +50,7 @@ Add to your Hermes MCP config:
 
 ## Data
 
-Stored in `~/.xmszm-memory/` as one JSON file per namespace.
+Stored in `~/.xmszm/memory/` as one JSON file per namespace.
 
 ## License
 
