@@ -5,7 +5,7 @@
   "type": "module",
   "main": "dist/index.js",
   "bin": {
-    "@xmszm/memory": "dist/index.js"
+    "xmszm-memory": "dist/index.js"
   },
   "files": [
     "dist/"
