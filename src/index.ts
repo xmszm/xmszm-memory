@@ -119,6 +119,18 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
       },
     },
     {
+      name: "get_triggered",
+      description:
+        "返回所有带 disclosure（触发条件）的记忆的 key 和触发条件，不返回 content。用于对话开始时快速了解哪些记忆需要触发。",
+      inputSchema: {
+        type: "object",
+        properties: {
+          namespace: { type: "string", description: "用户命名空间，如 xmszm" },
+        },
+        required: ["namespace"],
+      },
+    },
+    {
       name: "list_namespaces",
       description: "列出所有 namespace。注意：查询到 namespace 后，你必须再调用 search(该namespace, query) 才能获取记忆内容。只调 list_namespaces 不会返回任何记忆内容。",
       inputSchema: {
@@ -204,6 +216,21 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       return {
         content: [{ type: "text", text: `已删除 [${namespace}] ${key}` }],
       };
+    }
+
+    case "get_triggered": {
+      const { namespace } = args as any;
+      const memories = load(namespace);
+      const triggered = memories.filter((m) => m.disclosure);
+      if (triggered.length === 0) {
+        return {
+          content: [{ type: "text", text: `[${namespace}] 没有带触发条件的记忆` }],
+        };
+      }
+      const text = triggered
+        .map((m) => `• ${m.key} [${m.disclosure}]`)
+        .join("\n");
+      return { content: [{ type: "text", text }] };
     }
 
     case "list_namespaces": {

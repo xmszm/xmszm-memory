@@ -73,6 +73,7 @@ Most MCP-compatible clients accept the same format:
 | `read(namespace, key)` | Read a memory |
 | `search(namespace, query)` | Search memories by keyword |
 | `delete(namespace, key)` | Delete a memory |
+| `get_triggered(namespace)` | 返回所有带触发条件的记忆（只返回 key + disclosure，不返回 content） |
 | `list_namespaces()` | List all users |
 
 ## Data
