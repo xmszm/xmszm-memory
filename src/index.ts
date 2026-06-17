@@ -351,6 +351,14 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
         required: ["namespace"]
       },
     },
+    {
+      name: "reset_init",
+      description: "重置自动初始化标记，允许下次启动时重新执行自动部署。用于测试或重新配置。",
+      inputSchema: {
+        type: "object",
+        properties: {}
+      },
+    },
   ],
 }));
 
@@ -563,13 +571,113 @@ ${includeHook ? "1. 重启 AI 环境生效（新会话会自动加载记忆）" 
       };
     }
 
+    case "reset_init": {
+      const markerFile = join(DATA_DIR, ".auto-init-done");
+
+      if (!existsSync(markerFile)) {
+        return {
+          content: [{
+            type: "text",
+            text: "ℹ️ 自动初始化标记不存在，无需重置。\n\n下次 MCP 服务器启动时会自动执行初始化。"
+          }]
+        };
+      }
+
+      try {
+        const { unlinkSync } = await import("fs");
+        unlinkSync(markerFile);
+        return {
+          content: [{
+            type: "text",
+            text: "✅ 自动初始化标记已重置\n\n下次 MCP 服务器重启时将重新执行自动部署。"
+          }]
+        };
+      } catch (err: any) {
+        return {
+          content: [{
+            type: "text",
+            text: `❌ 重置失败: ${err.message}`
+          }]
+        };
+      }
+    }
+
     default:
       throw new Error(`Unknown tool: ${name}`);
   }
 });
 
+// ── Auto-Init on First Run ───────────────────────────
+async function autoInitIfNeeded() {
+  const home = homedir();
+  const markerFile = join(DATA_DIR, ".auto-init-done");
+
+  // 如果已经初始化过，跳过
+  if (existsSync(markerFile)) {
+    return;
+  }
+
+  console.error("[xmszm-memory] First run detected, auto-initializing...");
+
+  // 检测环境
+  const environments = detectEnvironments();
+  const detected = environments.filter(env => env.detected);
+
+  if (detected.length === 0) {
+    console.error("[xmszm-memory] No AI environment detected, skipping auto-init");
+    return;
+  }
+
+  // 尝试从已有数据中获取 namespace
+  let defaultNamespace = "user"; // 默认值
+
+  try {
+    if (existsSync(DATA_DIR)) {
+      const { readdirSync } = await import("fs");
+      const files = readdirSync(DATA_DIR).filter(f => f.endsWith(".json"));
+      if (files.length > 0) {
+        // 使用第一个找到的 namespace
+        defaultNamespace = files[0].replace(".json", "");
+      }
+    }
+  } catch {
+    // 忽略错误，使用默认值
+  }
+
+  const version = "1.1.0";
+  const results: string[] = [];
+
+  // 部署到所有检测到的环境
+  for (const env of detected) {
+    try {
+      const result = deployToEnvironment(env, defaultNamespace, true, version);
+      results.push(result.message);
+      console.error(`[xmszm-memory] ${result.message}`);
+    } catch (err: any) {
+      console.error(`[xmszm-memory] Failed to deploy to ${env.name}: ${err.message}`);
+    }
+  }
+
+  // 创建标记文件，避免重复初始化
+  try {
+    if (!existsSync(DATA_DIR)) mkdirSync(DATA_DIR, { recursive: true });
+    writeFileSync(markerFile, JSON.stringify({
+      initialized: new Date().toISOString(),
+      namespace: defaultNamespace,
+      environments: detected.map(e => e.name),
+      results
+    }, null, 2), "utf-8");
+    console.error("[xmszm-memory] Auto-init completed. Marker file created.");
+  } catch (err: any) {
+    console.error(`[xmszm-memory] Failed to create marker file: ${err.message}`);
+  }
+}
+
 // ── Main ──────────────────────────────────────────────
 async function main() {
+  // 启动时自动初始化
+  await autoInitIfNeeded();
+
   const mode = process.argv[2] || "stdio";
 
   if (mode === "sse") {
