@@ -84,7 +84,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     },
     {
       name: "read",
-      description: "读取一条记忆",
+      description: "用精确的 key 读取一条记忆。调用前请确保你知道确切的 key（先用 search 查到 key 再调这里）。",
       inputSchema: {
         type: "object",
         properties: {
@@ -96,7 +96,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     },
     {
       name: "search",
-      description: "按关键词搜索某用户的记忆",
+      description: "【主入口】按关键词搜索某用户的记忆。不知道具体 key 时应该先调这个来查找，而不是猜 key 去调用 read。",
       inputSchema: {
         type: "object",
         properties: {
