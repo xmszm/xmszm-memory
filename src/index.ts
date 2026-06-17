@@ -178,7 +178,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       const hits = memories.filter(
         (m) =>
           m.key.toLowerCase().includes(q) ||
-          m.content.toLowerCase().includes(q)
+          m.content.toLowerCase().includes(q) ||
+          m.disclosure.toLowerCase().includes(q)
       );
       if (hits.length === 0) {
         return {
