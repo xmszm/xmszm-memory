@@ -102,6 +102,47 @@ function detectEnvironments(): AIEnvironment[] {
   }));
 }
 
+function generateStopHookScript(namespace: string): string {
+  return `#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Stop Hook - Save important information before session ends
+"""
+import json
+import sys
+
+def main():
+    """Output hook result that reminds AI to save important info."""
+
+    context = """💾 会话结束协议
+
+在结束前，请检查本次对话中是否有需要保存的重要信息：
+- 用户的新偏好或习惯
+- 项目相关的重要决策
+- 需要记住的上下文
+
+如果有，使用 mcp__xmszm-memory__save 工具保存，格式：
+- namespace: "${namespace}"
+- key: "category/具体名称"（如 "preference/工具偏好"）
+- content: 具体内容
+- disclosure: 触发条件（如 "当需要使用工具时"）
+
+如果没有重要信息需要保存，无需操作。"""
+
+    result = {
+        "hookSpecificOutput": {
+            "hookEventName": "Stop",
+            "additionalContext": context,
+        }
+    }
+
+    print(json.dumps(result, ensure_ascii=False), flush=True)
+
+if __name__ == "__main__":
+    main()
+`;
+}
+
 function generateHookScript(namespace: string): string {
   return `#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
@@ -151,6 +192,18 @@ function generateHookConfig(): any {
             }
           ]
         }
+      ],
+      Stop: [
+        {
+          matcher: "",
+          hooks: [
+            {
+              type: "command",
+              command: "python .claude/hooks/stop.py",
+              timeout: 10
+            }
+          ]
+        }
       ]
     }
   };
@@ -169,6 +222,7 @@ function mergeHookConfig(existingPath: string, newHook: any): any {
   const merged = { ...existing };
   merged.hooks = merged.hooks || {};
   merged.hooks.SessionStart = newHook.hooks.SessionStart;
+  merged.hooks.Stop = newHook.hooks.Stop;
 
   return merged;
 }
@@ -230,17 +284,22 @@ function deployToEnvironment(
 
     let hookMessage = "";
 
-    // 2. Deploy hook (SessionStart auto-loading)
+    // 2. Deploy hook (SessionStart auto-loading + Stop save reminder)
     if (includeHook) {
       try {
-        // Deploy hook script
+        // Deploy SessionStart hook script
         // env.hookPath = ~/.claude/settings.json
         // hookScriptPath = ~/.claude/hooks/session-start.py
         const configDir = dirname(env.hookPath); // ~/.claude
-        const hookScriptPath = join(configDir, "hooks", "session-start.py");
-        mkdirSync(dirname(hookScriptPath), { recursive: true });
-        const hookScript = generateHookScript(namespace);
-        writeFileSync(hookScriptPath, hookScript, "utf-8");
+        const sessionStartPath = join(configDir, "hooks", "session-start.py");
+        mkdirSync(dirname(sessionStartPath), { recursive: true });
+        const sessionStartScript = generateHookScript(namespace);
+        writeFileSync(sessionStartPath, sessionStartScript, "utf-8");
+
+        // Deploy Stop hook script
+        const stopHookPath = join(configDir, "hooks", "stop.py");
+        const stopHookScript = generateStopHookScript(namespace);
+        writeFileSync(stopHookPath, stopHookScript, "utf-8");
 
         // Deploy hook config
         mkdirSync(dirname(env.hookPath), { recursive: true });
@@ -248,7 +307,7 @@ function deployToEnvironment(
         const merged = mergeHookConfig(env.hookPath, hookConfig);
         writeFileSync(env.hookPath, JSON.stringify(merged, null, 2), "utf-8");
 
-        hookMessage = " + auto-load hook";
+        hookMessage = " + auto-load hook + save-reminder hook";
       } catch (hookErr: any) {
         return {
           success: true,
@@ -609,12 +668,14 @@ ${summary}
 
 📝 部署内容：
 • Skill 文件：/init-memory 命令
-${includeHook ? "• Hook 脚本：.claude/hooks/session-start.py" : ""}
-${includeHook ? "• Hook 配置：SessionStart 自动触发" : "• Hook 配置：未部署（需手动调用 /init-memory）"}
+${includeHook ? "• SessionStart Hook：会话开始时自动加载记忆" : ""}
+${includeHook ? "• Stop Hook：会话结束时提醒保存重要信息" : ""}
+${includeHook ? "• Hook 配置：自动触发" : "• Hook 配置：未部署（需手动调用 /init-memory）"}
 
-🎯 下一步：
-${includeHook ? "1. 重启 AI 环境生效" : "1. 手动输入 /init-memory 加载记忆"}
-${includeHook ? "2. 新会话会自动加载命名空间 [${namespace}] 的记忆 ✨" : "2. 每次会话开始时手动加载记忆"}
+🎯 工作流程：
+${includeHook ? "1. 会话开始 → 自动加载记忆 ✨" : "1. 手动输入 /init-memory 加载记忆"}
+${includeHook ? "2. 对话进行中 → AI 主动保存重要信息" : "2. 手动保存记忆"}
+${includeHook ? "3. 会话结束 → AI 检查并保存遗漏信息 💾" : "3. 每次会话开始时手动加载记忆"}
 
 ✨ ${successCount}/${targets.length} 个环境部署成功${errorDetails}`;
 
