@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "ConversationStart": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "inject-context",
+            "content": "🎯 会话启动 - 立即加载记忆：\n\n调用 mcp__xmszm-memory__load_session(namespace=\"xmszm\")\n\n这个工具会一次性返回所有触发记忆的完整内容。\n\n⚠️ 必须在第一次回复前执行，不要只是承诺会做。",
+            "location": "before-conversation"
+          }
+        ]
+      }
+    ]
+  }
+}

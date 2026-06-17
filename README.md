@@ -74,6 +74,7 @@ Most MCP-compatible clients accept the same format:
 | `search(namespace, query)` | Search memories by keyword |
 | `delete(namespace, key)` | Delete a memory |
 | `get_triggered(namespace)` | 返回所有带触发条件的记忆（只返回 key + disclosure，不返回 content） |
+| `load_session(namespace)` | **【推荐】** 一次性加载所有触发记忆的完整内容，会话启动时使用 |
 | `list_namespaces()` | List all users |
 
 ## Data

@@ -131,6 +131,18 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
       },
     },
     {
+      name: "load_session",
+      description:
+        "【会话启动专用】一次性加载所有带触发条件的记忆的完整内容。等同于 get_triggered + 批量 read，但只需一次调用。会话开始时优先使用此工具。",
+      inputSchema: {
+        type: "object",
+        properties: {
+          namespace: { type: "string", description: "用户命名空间，如 xmszm" },
+        },
+        required: ["namespace"],
+      },
+    },
+    {
       name: "list_namespaces",
       description: "列出所有 namespace。注意：查询到 namespace 后，你必须再调用 search(该namespace, query) 才能获取记忆内容。只调 list_namespaces 不会返回任何记忆内容。",
       inputSchema: {
@@ -231,6 +243,26 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         .map((m) => `• ${m.key} [${m.disclosure}]`)
         .join("\n");
       return { content: [{ type: "text", text }] };
+    }
+
+    case "load_session": {
+      const { namespace } = args as any;
+      const memories = load(namespace);
+      const triggered = memories.filter((m) => m.disclosure);
+      if (triggered.length === 0) {
+        return {
+          content: [{ type: "text", text: `[${namespace}] 没有带触发条件的记忆` }],
+        };
+      }
+      const text = triggered
+        .map((m) => {
+          const header = `━━━ ${m.key} ━━━\n触发: ${m.disclosure}\n`;
+          const content = m.content;
+          const footer = `\n更新: ${m.updatedAt}\n`;
+          return header + content + footer;
+        })
+        .join("\n");
+      return { content: [{ type: "text", text: `✅ 已加载 ${triggered.length} 条会话记忆：\n\n${text}` }] };
     }
 
     case "list_namespaces": {
