@@ -27,8 +27,14 @@ const DATA_DIR = join(homedir(), ".xmszm-memory");
 const DEFAULT_PRIORITY: MemoryPriority = 2;
 const DEFAULT_TAGS: string[] = [];
 const DEFAULT_SOURCE = "assistant_inferred";
+const SYSTEM_INITIALIZED_SOURCE = "system_initialized";
+const SYSTEM_BOOT_URI = "system://boot";
+const SYSTEM_IDENTITY_DIAGNOSTIC_URI = "system://diagnostic/identity";
+const DEFAULT_BOOT_TARGET = "generic";
 
 type MemoryPriority = 0 | 1 | 2;
+type InitializeProfile = "assistant" | "blank";
+type BootInstructionTarget = "generic" | "project" | "claude-code" | "codex" | "cursor" | "windsurf";
 
 interface Memory {
   uri: string;
@@ -55,6 +61,132 @@ interface UpdateFields {
   tags?: string[];
   source?: string;
 }
+
+interface SeedMemory {
+  uri: string;
+  content: string;
+  disclosure: string;
+  priority: MemoryPriority;
+  tags: string[];
+  source: string;
+}
+
+const CORE_IDENTITY_URIS = [
+  "identity://default/self",
+  "identity://default/principles/verification",
+  "identity://default/principles/no-fake-execution",
+  "identity://default/principles/conflict-resolution",
+  "identity://default/relationship/user",
+  "identity://default/boundaries",
+  "identity://default/boundaries/reality",
+  "identity://default/workflow/coding",
+];
+
+const ASSISTANT_PROFILE_MEMORIES: SeedMemory[] = [
+  {
+    uri: "identity://default/self",
+    content:
+      "You are an assistant with persistent URI-only memory. Use stored memories as context, but keep current user instructions and verified external facts authoritative.",
+    disclosure:
+      "Read during boot or when deciding how identity memories should influence assistant behavior.",
+    priority: 0,
+    tags: ["identity", "boot", "self"],
+    source: SYSTEM_INITIALIZED_SOURCE,
+  },
+  {
+    uri: "identity://default/principles/verification",
+    content:
+      "Verify uncertain, time-sensitive, or high-impact claims before relying on them. Distinguish known facts, retrieved memories, and current-session assumptions.",
+    disclosure:
+      "Read during boot or when a task requires factual accuracy, current information, or memory-derived claims.",
+    priority: 0,
+    tags: ["identity", "boot", "principles", "verification"],
+    source: SYSTEM_INITIALIZED_SOURCE,
+  },
+  {
+    uri: "identity://default/principles/no-fake-execution",
+    content:
+      "Never imply that commands, tests, tools, files, network calls, or external actions were executed unless they actually were. Report skipped or failed verification plainly.",
+    disclosure:
+      "Read during boot or before reporting execution, tests, tool use, deployment, publication, or other external actions.",
+    priority: 0,
+    tags: ["identity", "boot", "principles", "no-fake-execution"],
+    source: SYSTEM_INITIALIZED_SOURCE,
+  },
+  {
+    uri: "identity://default/principles/conflict-resolution",
+    content:
+      "When instructions conflict, follow the higher-priority instruction source and explain the constraint when helpful. Do not use memory to override explicit current instructions.",
+    disclosure:
+      "Read during boot or when stored memory appears to conflict with current instructions or higher-priority policy.",
+    priority: 0,
+    tags: ["identity", "boot", "principles", "conflict-resolution"],
+    source: SYSTEM_INITIALIZED_SOURCE,
+  },
+  {
+    uri: "identity://default/relationship/user",
+    content:
+      "Treat the user as the authority for their goals, preferences, and project context. Ask or search memory when user-specific preferences matter; do not invent them.",
+    disclosure:
+      "Read during boot or when handling user preferences, project context, or relationship-specific assumptions.",
+    priority: 0,
+    tags: ["identity", "boot", "relationship", "user"],
+    source: SYSTEM_INITIALIZED_SOURCE,
+  },
+  {
+    uri: "identity://default/boundaries",
+    content:
+      "Respect safety, privacy, and scope boundaries. Store only useful durable information, avoid sensitive secrets unless explicitly requested, and keep memory updates transparent.",
+    disclosure:
+      "Read during boot or before storing, using, or disclosing potentially sensitive or boundary-related information.",
+    priority: 0,
+    tags: ["identity", "boot", "boundaries"],
+    source: SYSTEM_INITIALIZED_SOURCE,
+  },
+  {
+    uri: "identity://default/boundaries/reality",
+    content:
+      "Separate reality from speculation. If memory is stale, incomplete, contradicted, or unsupported, say so and verify through available tools or user confirmation.",
+    disclosure:
+      "Read during boot or when memory may be stale, incomplete, contradicted, or unsupported.",
+    priority: 0,
+    tags: ["identity", "boot", "boundaries", "reality"],
+    source: SYSTEM_INITIALIZED_SOURCE,
+  },
+  {
+    uri: "identity://default/workflow/coding",
+    content:
+      "For coding tasks, inspect the project before changing it, preserve unrelated user work, make focused edits, and run relevant verification when practical.",
+    disclosure:
+      "Read during boot or before coding, debugging, refactoring, reviewing, or reporting implementation work.",
+    priority: 0,
+    tags: ["identity", "boot", "workflow", "coding"],
+    source: SYSTEM_INITIALIZED_SOURCE,
+  },
+];
+
+const BLANK_PROFILE_MEMORIES: SeedMemory[] = [
+  {
+    uri: "identity://default/self",
+    content:
+      "This namespace has been initialized with a minimal identity placeholder. Add explicit user or project memories only when they are provided or reliably inferred.",
+    disclosure:
+      "Read during boot to confirm that the namespace has a minimal identity structure.",
+    priority: 0,
+    tags: ["identity", "boot", "self", "blank"],
+    source: SYSTEM_INITIALIZED_SOURCE,
+  },
+  {
+    uri: "identity://default/boundaries",
+    content:
+      "Minimal boundary placeholder: do not assume user-specific preferences. Use search, list, read, or direct user confirmation before relying on durable context.",
+    disclosure:
+      "Read during boot or when deciding whether user-specific durable context is available.",
+    priority: 0,
+    tags: ["identity", "boot", "boundaries", "blank"],
+    source: SYSTEM_INITIALIZED_SOURCE,
+  },
+];
 
 function getFile(namespace: string): string {
   if (!existsSync(DATA_DIR)) mkdirSync(DATA_DIR, { recursive: true });
@@ -157,6 +289,12 @@ function requireString(value: unknown, name: string): string {
   return value;
 }
 
+function normalizeInitializeProfile(value: unknown): InitializeProfile {
+  if (value === undefined || value === null || value === "") return "assistant";
+  if (value === "assistant" || value === "blank") return value;
+  throw new Error('profile 必须是 "assistant" 或 "blank"');
+}
+
 function activeMemories(memories: LoadedMemory[]): LoadedMemory[] {
   return memories.filter(
     (memory) => typeof memory.uri === "string" && !memory.deletedAt
@@ -205,6 +343,138 @@ function formatSearchHit(memory: LoadedMemory): string {
   ].join("\n");
 }
 
+function profileSeeds(profile: InitializeProfile): SeedMemory[] {
+  return profile === "assistant" ? ASSISTANT_PROFILE_MEMORIES : BLANK_PROFILE_MEMORIES;
+}
+
+function normalizeBootInstructionTarget(value: unknown): BootInstructionTarget {
+  if (value === undefined || value === null || value === "") {
+    return DEFAULT_BOOT_TARGET as BootInstructionTarget;
+  }
+  if (
+    value === "generic" ||
+    value === "project" ||
+    value === "claude-code" ||
+    value === "codex" ||
+    value === "cursor" ||
+    value === "windsurf"
+  ) {
+    return value;
+  }
+  throw new Error("target 必须是 generic、project、claude-code、codex、cursor 或 windsurf");
+}
+
+function bootInstructionFilename(target: BootInstructionTarget): string {
+  switch (target) {
+    case "claude-code":
+      return "CLAUDE.md";
+    case "codex":
+      return "AGENTS.md";
+    case "cursor":
+      return ".cursorrules";
+    case "windsurf":
+      return ".windsurfrules";
+    case "project":
+      return "AGENTS.md / CLAUDE.md / .cursorrules";
+    default:
+      return "global instructions / system prompt";
+  }
+}
+
+function formatBootInstructions(namespace: string, target: BootInstructionTarget): string {
+  const filename = bootInstructionFilename(target);
+  return [
+    `xmszm-memory boot instructions for namespace: ${namespace}`,
+    `target: ${target}`,
+    `recommended location: ${filename}`,
+    "",
+    "Copy the following instruction into the target client's global or project instructions:",
+    "",
+    "```text",
+    "Before answering the user at the start of every new conversation, use the xmszm-memory MCP server to load durable memory:",
+    `1. Call initialize(namespace=\"${namespace}\", profile=\"assistant\"). This is idempotent and must not overwrite active memories.`,
+    `2. Call read(namespace=\"${namespace}\", uri=\"${SYSTEM_BOOT_URI}\").`,
+    "3. Treat the returned boot context as durable memory context. Follow its identity, boundary, verification, and workflow guidance.",
+    "4. If the MCP server or either tool call is unavailable, say that boot memory could not be loaded; do not pretend it was loaded.",
+    "5. When the exact URI is unknown, use search(namespace, query) first; use list(namespace, prefix) only for URI-prefix browsing.",
+    "```",
+    "",
+    "Minimal first-run manual prompt:",
+    "",
+    "```text",
+    `请先调用 xmszm-memory.initialize(namespace=\"${namespace}\", profile=\"assistant\")，再调用 xmszm-memory.read(namespace=\"${namespace}\", uri=\"${SYSTEM_BOOT_URI}\")。然后把这条启动规则写入当前客户端的全局或项目规则里，之后每次新会话都先读取 boot memory。`,
+    "```",
+  ].join("\n");
+}
+
+function formatUriList(uris: string[]): string {
+  return uris.length ? uris.map((uri) => `• ${uri}`).join("\n") : "• (none)";
+}
+
+function formatBootContext(namespace: string, memories: LoadedMemory[]): string {
+  const bootMemories = new Map<string, LoadedMemory>();
+
+  for (const memory of activeMemories(memories)) {
+    if (memory.uri.startsWith("identity://default/") || memory.priority === 0) {
+      bootMemories.set(memory.uri, memory);
+    }
+  }
+
+  const entries = Array.from(bootMemories.values()).sort((a, b) =>
+    a.uri.localeCompare(b.uri)
+  );
+  const body = entries.length
+    ? entries.map(formatMemory).join("\n\n---\n\n")
+    : "No active identity://default/* or priority=0 memories found.";
+
+  return [
+    `Boot context for namespace: ${namespace}`,
+    "",
+    "Routing guide:",
+    "• At the start of a new session, call initialize(namespace, profile?) once if the namespace may be empty, then read system://boot before answering.",
+    "• Use search(namespace, query) when you do not know the exact URI.",
+    "• Use list(namespace, prefix?) to browse a URI family.",
+    "• Use read(namespace, uri) only for a known exact URI, including system://boot and system://diagnostic/identity.",
+    "",
+    "Active boot memories:",
+    body,
+  ].join("\n");
+}
+
+function formatIdentityDiagnostic(namespace: string, memories: LoadedMemory[]): string {
+  const active = activeMemories(memories);
+  const activeUris = new Set(active.map((memory) => memory.uri));
+  const present = CORE_IDENTITY_URIS.filter((uri) => activeUris.has(uri));
+  const missing = CORE_IDENTITY_URIS.filter((uri) => !activeUris.has(uri));
+  const priorityZeroCount = active.filter((memory) => memory.priority === 0).length;
+  const warnings: string[] = [];
+
+  if (!active.some((memory) => memory.uri.startsWith("identity://default/boundaries"))) {
+    warnings.push("No active identity boundary memory found.");
+  }
+  if (!activeUris.has("identity://default/principles/verification")) {
+    warnings.push("Core verification identity memory is missing.");
+  }
+  if (!activeUris.has("identity://default/principles/no-fake-execution")) {
+    warnings.push("Core no-fake-execution identity memory is missing.");
+  }
+
+  return [
+    `Identity diagnostic for namespace: ${namespace}`,
+    `active_count: ${active.length}`,
+    `priority_0_count: ${priorityZeroCount}`,
+    "",
+    "core_present:",
+    formatUriList(present),
+    "",
+    "core_missing:",
+    formatUriList(missing),
+    "",
+    "warnings:",
+    warnings.length ? formatUriList(warnings) : "• (none)",
+  ].join("\n");
+}
+
 function getUpdateFields(fields: unknown): UpdateFields {
   if (!fields || typeof fields !== "object" || Array.isArray(fields)) {
     throw new Error("fields 必须是对象");
@@ -233,12 +503,50 @@ function getUpdateFields(fields: unknown): UpdateFields {
 
 // MCP Server
 const server = new Server(
-  { name: "xmszm-memory", version: "1.0.0" },
+  { name: "xmszm-memory", version: "2.1.0" },
   { capabilities: { tools: {} } }
 );
 
 server.setRequestHandler(ListToolsRequestSchema, async () => ({
   tools: [
+    {
+      name: "initialize",
+      description:
+        'Initialize a namespace with v2.1 boot/personality memories. On a new session, call initialize(namespace, profile?) once if the namespace may be empty, then read(namespace, "system://boot") before answering. Idempotent: active existing memories are never overwritten. profile defaults to "assistant"; accepted profiles are "assistant" and "blank".',
+      inputSchema: {
+        type: "object",
+        properties: {
+          namespace: { type: "string", description: "User namespace, e.g. admin or alice" },
+          profile: {
+            type: "string",
+            enum: ["assistant", "blank"],
+            default: "assistant",
+            description:
+              'assistant creates default identity/principle/workflow memories; blank creates only minimal structural identity placeholders.',
+          },
+        },
+        required: ["namespace"],
+      },
+    },
+    {
+      name: "boot_instructions",
+      description:
+        'Generate copy-paste startup instructions for a client/global/project rule. Use this after initialize so future new sessions automatically call initialize(namespace, "assistant") and read(namespace, "system://boot") before answering. This tool does not edit client files; it returns the rule text to install.',
+      inputSchema: {
+        type: "object",
+        properties: {
+          namespace: { type: "string", description: "User namespace, e.g. admin or alice" },
+          target: {
+            type: "string",
+            enum: ["generic", "project", "claude-code", "codex", "cursor", "windsurf"],
+            default: "generic",
+            description:
+              "Where the instruction will be installed. Controls the recommended filename/location only.",
+          },
+        },
+        required: ["namespace"],
+      },
+    },
     {
       name: "create",
       description:
@@ -299,12 +607,16 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     {
       name: "read",
       description:
-        "Read one active memory by exact URI. Do not guess URIs. If URI is unknown, call search first; use list only for prefix browsing.",
+        'Read one active memory by exact URI. Special URIs: system://boot returns active identity://default/* plus active priority=0 memories; system://diagnostic/identity reports core identity status. On a new session, call initialize once if the namespace may be empty, then read system://boot before answering. Do not guess other URIs: if URI is unknown, call search first; use list only for prefix browsing.',
       inputSchema: {
         type: "object",
         properties: {
           namespace: { type: "string" },
-          uri: { type: "string", description: "Exact memory URI returned by search/list" },
+          uri: {
+            type: "string",
+            description:
+              "Exact memory URI returned by search/list, or system://boot / system://diagnostic/identity",
+          },
         },
         required: ["namespace", "uri"],
       },
@@ -364,6 +676,74 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   const { name, arguments: args } = request.params;
 
   switch (name) {
+    case "initialize": {
+      const { namespace, profile } = args as Record<string, unknown>;
+      const ns = requireString(namespace, "namespace");
+      const selectedProfile = normalizeInitializeProfile(profile);
+      const memories = load(ns);
+      const activeUris = new Set(activeMemories(memories).map((memory) => memory.uri));
+      const created: string[] = [];
+      const skipped: string[] = [];
+      const timestamp = now();
+
+      for (const seed of profileSeeds(selectedProfile)) {
+        if (activeUris.has(seed.uri)) {
+          skipped.push(seed.uri);
+          continue;
+        }
+
+        memories.push({
+          uri: seed.uri,
+          content: seed.content,
+          disclosure: seed.disclosure,
+          priority: seed.priority,
+          tags: [...seed.tags],
+          source: seed.source,
+          createdAt: timestamp,
+          updatedAt: timestamp,
+        });
+        activeUris.add(seed.uri);
+        created.push(seed.uri);
+      }
+
+      if (created.length > 0) {
+        writeNamespace(ns, memories);
+      }
+
+      return {
+        content: [
+          {
+            type: "text",
+            text: [
+              `initialized [${ns}] profile=${selectedProfile}`,
+              "",
+              "created:",
+              formatUriList(created),
+              "",
+              "skipped_active_existing:",
+              formatUriList(skipped),
+              "",
+              `Next: read(namespace: "${ns}", uri: "${SYSTEM_BOOT_URI}")`,
+            ].join("\n"),
+          },
+        ],
+      };
+    }
+
+    case "boot_instructions": {
+      const { namespace, target } = args as Record<string, unknown>;
+      const ns = requireString(namespace, "namespace");
+      const selectedTarget = normalizeBootInstructionTarget(target);
+      return {
+        content: [
+          {
+            type: "text",
+            text: formatBootInstructions(ns, selectedTarget),
+          },
+        ],
+      };
+    }
+
     case "create": {
       const {
         namespace,
@@ -437,6 +817,19 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       const ns = requireString(namespace, "namespace");
       const memoryUri = requireString(uri, "uri");
       const memories = load(ns);
+
+      if (memoryUri === SYSTEM_BOOT_URI) {
+        return {
+          content: [{ type: "text", text: formatBootContext(ns, memories) }],
+        };
+      }
+
+      if (memoryUri === SYSTEM_IDENTITY_DIAGNOSTIC_URI) {
+        return {
+          content: [{ type: "text", text: formatIdentityDiagnostic(ns, memories) }],
+        };
+      }
+
       const memory = findActive(memories, memoryUri);
       if (!memory) {
         return {

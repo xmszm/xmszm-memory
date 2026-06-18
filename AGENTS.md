@@ -25,16 +25,55 @@ xmszm-memory 是一个 MCP（Model Context Protocol）记忆服务，通过 URI-
 | 工具 | 作用 | 使用时机 |
 |------|------|---------|
 | `list_namespaces()` | 列出所有用户命名空间 | 首次连接时，确认有哪些用户；不会返回记忆内容 |
+| `initialize(namespace, profile?)` | 初始化 v2.1 boot/personality 记忆；`profile` 默认为 `"assistant"`，也支持 `"blank"` | 新会话开始且 namespace 可能为空时调用一次；幂等，不覆盖 active 已有记忆 |
+| `boot_instructions(namespace, target?)` | 生成可复制到客户端全局/项目规则的启动指令；`target` 支持 `generic/project/claude-code/codex/cursor/windsurf` | 第一次接入某个客户端时调用一次，让后续新会话自动 initialize + read system://boot |
 | `search(namespace, query)` | 按关键词搜索 active 记忆，会搜索 `uri/content/disclosure/tags/source` | **主入口**。不知道具体 URI 时先调这个 |
-| `read(namespace, uri)` | 用精确 URI 读取一条 active 记忆 | 仅当已知道 exact URI |
+| `read(namespace, uri)` | 用精确 URI 读取一条 active 记忆；支持特殊 URI `system://boot` 和 `system://diagnostic/identity` | 新会话初始化后先读 `system://boot`；其他记忆仅当已知道 exact URI |
 | `list(namespace, prefix?)` | 浏览 active 记忆，可按 URI prefix 过滤 | 已知道 URI 前缀、想浏览一组记忆时 |
 | `create(namespace, uri, content, disclosure, priority?, tags?, source?)` | 创建一条新记忆 | 用户告知新信息或偏好，且目标 URI 不存在时 |
 | `update(namespace, uri, fields)` | 修改已有 active 记忆，不改变 `createdAt` | 需要修改正文、触发条件、优先级、标签或来源时 |
 | `delete(namespace, uri)` | 软删除一条 active 记忆，设置 `deletedAt` | 用户要求删除时；必须知道 exact URI |
 
+## Boot / Personality 初始化流程
+
+新会话开始时，如果 namespace 可能为空或不确定是否已初始化，客户端应先调用：
+
+```text
+initialize(namespace, "assistant")  # 默认 profile，可省略第二个参数
+read(namespace, "system://boot")
+```
+
+`initialize` 必须幂等：
+
+- active 已存在的 URI 只报告为 `skipped_active_existing`，不得覆盖。
+- 缺失的默认记忆报告为 `created`。
+- 默认写入 `priority=0`、`source="system_initialized"`，并带有 `identity` / `boot` 等 tags。
+
+Profiles：
+
+| profile | 行为 |
+|---------|------|
+| `"assistant"` | 创建默认 identity/principles/boundaries/workflow 记忆，至少包括 `identity://default/self`、verification、no-fake-execution、conflict-resolution、relationship/user、boundaries、boundaries/reality、workflow/coding。 |
+| `"blank"` | 只创建最小结构占位，例如 `identity://default/self` 和 boundaries；不得假设用户特定偏好。 |
+
+特殊读取：
+
+| URI | 返回内容 |
+|-----|----------|
+| `system://boot` | active 的 `identity://default/*` 记忆 + 所有 active `priority=0` 记忆；按 URI 去重、排序，并附带简短 routing guide。 |
+| `system://diagnostic/identity` | 报告 core identity URI 是否存在、缺失项、active 数量、priority-0 数量，以及缺少 boundaries / verification / no-fake-execution 时的 warnings。 |
+
 ## 正确调用流程
 
 ```text
+[新会话]
+    |
+    v
+initialize(namespace, profile?)  <- namespace 可能为空时先调用一次
+    |
+    v
+read(namespace, "system://boot") <- 回答前读取 boot context
+
 [用户消息]
     |
     v
@@ -48,6 +87,25 @@ search(namespace, query)  <- 解析消息中的关键词，搜相关记忆
 
 ```text
 list(namespace, prefix) -> read/update/delete(namespace, exactUri)
+```
+
+## 启动规则安装
+
+第一次接入某个客户端时，先调用：
+
+```text
+boot_instructions(namespace, target?)
+```
+
+把返回的规则复制到该客户端的全局指令或项目规则文件里。否则 MCP 只是“可用”，模型可能直到用户明确询问 xmszm-memory 才会加载工具；安装启动规则后，后续新会话才会主动 initialize + read `system://boot`。
+
+常用 target：
+
+```text
+boot_instructions("admin", "generic")
+boot_instructions("admin", "codex")
+boot_instructions("admin", "claude-code")
+boot_instructions("admin", "cursor")
 ```
 
 ## 重要规则
