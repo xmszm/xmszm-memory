@@ -1,8 +1,0 @@
-{
-  "mcpServers": {
-    "xmszm-memory": {
-      "command": "node",
-      "args": ["dist/index.js"]
-    }
-  }
-}

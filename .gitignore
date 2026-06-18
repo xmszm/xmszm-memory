@@ -3,3 +3,5 @@ dist/
 *.db
 .env
 .github_token
+
+.hermes-tmp/

@@ -6,6 +6,23 @@ xmszm-memory 是一个 MCP（Model Context Protocol）记忆服务，通过 URI-
 
 每条记忆使用 `uri` 作为唯一标识。没有 `key` 字段，也不要调用或假设任何 key-based API。
 
+## 三段式使用流程
+
+```text
+1. 配置 MCP
+   -> 客户端能看到 xmszm-memory 工具。
+
+2. 首次使用初始化
+   -> initialize(namespace, profile?) 创建 boot/personality 记忆。
+   -> boot_instructions(namespace, target?) 生成要写入 AGENTS.md、CLAUDE.md、.cursorrules 或全局指令的启动规则。
+
+3. 正常对话
+   -> 已安装的客户端规则让每个新会话先调用 initialize(...) 和 read(..., "system://boot")。
+   -> 对话中按需 search/read/list 召回记忆，create/update/delete 维护长期记忆。
+```
+
+注意：MCP Server 只能提供工具，不能强迫客户端在会话开始时自动调用工具。自动加载记忆必须依赖 `boot_instructions` 返回的客户端/项目规则。
+
 ## Memory 字段
 
 | 字段 | 说明 |
@@ -34,9 +51,19 @@ xmszm-memory 是一个 MCP（Model Context Protocol）记忆服务，通过 URI-
 | `update(namespace, uri, fields)` | 修改已有 active 记忆，不改变 `createdAt` | 需要修改正文、触发条件、优先级、标签或来源时 |
 | `delete(namespace, uri)` | 软删除一条 active 记忆，设置 `deletedAt` | 用户要求删除时；必须知道 exact URI |
 
-## Boot / Personality 初始化流程
+## 首次初始化与 Boot / Personality 流程
 
-新会话开始时，如果 namespace 可能为空或不确定是否已初始化，客户端应先调用：
+首次接入某个客户端时，先调用：
+
+```text
+initialize(namespace, "assistant")
+read(namespace, "system://boot")
+boot_instructions(namespace, target?)
+```
+
+然后把 `boot_instructions` 返回的规则安装到该客户端的全局或项目规则中。
+
+安装规则后，新会话开始时，如果 namespace 可能为空或不确定是否已初始化，客户端应先调用：
 
 ```text
 initialize(namespace, "assistant")  # 默认 profile，可省略第二个参数

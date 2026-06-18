@@ -6,6 +6,25 @@ Each user gets an isolated namespace. Memories persist across sessions within th
 
 ## Usage
 
+### Lifecycle
+
+xmszm-memory has three separate steps. Do not confuse MCP connection with automatic memory loading.
+
+```text
+1. Configure MCP
+   -> The client can see xmszm-memory tools.
+
+2. First-use initialization
+   -> initialize(namespace, profile?) creates boot/personality memories.
+   -> boot_instructions(namespace, target?) generates the client rule to install into AGENTS.md, CLAUDE.md, .cursorrules, or global instructions.
+
+3. Normal conversations
+   -> The installed client rule makes each new session call initialize(...) and read(..., "system://boot") before answering.
+   -> During conversation, the model uses search/read/list to recall memory and create/update/delete to maintain durable memory.
+```
+
+Important: MCP servers cannot force clients to call tools at session start. Automatic memory loading only works after the returned `boot_instructions` rule is installed in the client or project instructions.
+
 ### Requirements
 
 - Node.js >= 18 (if installed via npm)
@@ -37,7 +56,15 @@ npx -y @xmszm/memory sse 3000
 }
 ```
 
-### Claude Code Configuration (claude.json)
+### Claude Code Configuration
+
+User-scope example:
+
+```bash
+claude mcp add -s user xmszm-memory -- npx -y @xmszm/memory
+```
+
+JSON example:
 
 ```json
 {
@@ -99,6 +126,18 @@ Deleted memories are soft-deleted with `deletedAt` and are excluded from `read`,
 | `delete(namespace, uri)` | Soft-delete one active memory by exact URI by setting `deletedAt`. |
 | `list_namespaces()` | List all namespaces only; it does not return memories. |
 
+## First-use Initialization
+
+After MCP is configured, ask the client once to initialize the namespace and generate its startup rule.
+
+Recommended first prompt:
+
+```text
+Use xmszm-memory. Call initialize("admin", "assistant"), then read("admin", "system://boot"), then call boot_instructions("admin", "<target>") and install the returned rule into this client's global or project instructions.
+```
+
+Use target `claude-code`, `codex`, `cursor`, `windsurf`, `project`, or `generic`.
+
 ## Boot Flow
 
 At the start of a new session, clients should initialize the namespace once if it may be empty, then read the boot context before answering:
@@ -127,7 +166,9 @@ Special reads:
 Recommended memory flow:
 
 ```text
-New session -> initialize(namespace, profile?) -> read(namespace, "system://boot")
+Configure MCP once -> client can see xmszm-memory tools
+First use once -> initialize(namespace, profile?) -> read(namespace, "system://boot") -> boot_instructions(namespace, target?) -> install returned rule
+Every new session -> installed rule triggers initialize(namespace, profile?) -> read(namespace, "system://boot")
 Unknown URI -> search(namespace, query) -> read/update/delete(namespace, exactUri)
 Browse URI prefix -> list(namespace, prefix)
 Create new memory -> create(namespace, uri, ...)
