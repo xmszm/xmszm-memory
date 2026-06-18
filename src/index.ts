@@ -3,7 +3,7 @@
  * xmszm-memory — Personal MCP Memory Server
  *
  * Multi-user memory with isolated namespaces.
- * Each user's memories stored in a separate JSON file.
+ * Each user's memories are stored in a separate JSON file.
  *
  * Usage:
  *   xmszm-memory                    # stdio mode (default, for MCP clients)
@@ -18,37 +18,66 @@ import {
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "fs";
-import { join, dirname } from "path";
+import { join } from "path";
 import { homedir } from "os";
 import { createServer } from "http";
 
-// ── Storage ───────────────────────────────────────────
+// Storage
 const DATA_DIR = join(homedir(), ".xmszm-memory");
+const DEFAULT_PRIORITY: MemoryPriority = 2;
+const DEFAULT_TAGS: string[] = [];
+const DEFAULT_SOURCE = "assistant_inferred";
+
+type MemoryPriority = 0 | 1 | 2;
+
+interface Memory {
+  uri: string;
+  content: string;
+  disclosure: string;
+  priority?: MemoryPriority;
+  tags?: string[];
+  source?: string;
+  createdAt: string;
+  updatedAt: string;
+  deletedAt?: string;
+}
+
+type LoadedMemory = Memory & {
+  priority: MemoryPriority;
+  tags: string[];
+  source: string;
+};
+
+interface UpdateFields {
+  content?: string;
+  disclosure?: string;
+  priority?: MemoryPriority;
+  tags?: string[];
+  source?: string;
+}
 
 function getFile(namespace: string): string {
   if (!existsSync(DATA_DIR)) mkdirSync(DATA_DIR, { recursive: true });
   return join(DATA_DIR, `${namespace}.json`);
 }
 
-interface Memory {
-  key: string;
-  content: string;
-  disclosure: string;
-  createdAt: string;
-  updatedAt: string;
-}
-
-function load(namespace: string): Memory[] {
+function load(namespace: string): LoadedMemory[] {
   const file = getFile(namespace);
   if (!existsSync(file)) return [];
   try {
-    return JSON.parse(readFileSync(file, "utf-8"));
+    const parsed = JSON.parse(readFileSync(file, "utf-8"));
+    return Array.isArray(parsed)
+      ? parsed.flatMap((record) => {
+          const memory = normalizeStoredMemory(record);
+          return memory ? [memory] : [];
+        })
+      : [];
   } catch {
     return [];
   }
 }
 
-function save(namespace: string, data: Memory[]) {
+function writeNamespace(namespace: string, data: LoadedMemory[]) {
   writeFileSync(getFile(namespace), JSON.stringify(data, null, 2), "utf-8");
 }
 
@@ -56,439 +85,153 @@ function now(): string {
   return new Date().toISOString();
 }
 
-// ── Environment Detection & Deployment ────────────────
-interface AIEnvironment {
-  name: string;
-  detected: boolean;
-  skillPath: string;
-  hookPath: string;
+function isValidPriority(value: unknown): value is MemoryPriority {
+  return value === 0 || value === 1 || value === 2;
 }
 
-function detectEnvironments(): AIEnvironment[] {
-  const home = homedir();
-
-  const environments = [
-    {
-      name: "claude-code",
-      skillPath: join(home, ".claude/commands/init-memory.md"),
-      hookPath: join(home, ".claude/settings.json"),
-      detect: () => existsSync(join(home, ".claude")) || !!process.env.CLAUDE_CODE_VERSION
-    },
-    {
-      name: "codex",
-      skillPath: join(home, ".codex/commands/init-memory.md"),
-      hookPath: join(home, ".codex/hooks.json"),
-      detect: () => existsSync(join(home, ".codex"))
-    },
-    {
-      name: "cursor",
-      skillPath: join(home, ".cursor/commands/init-memory.md"),
-      hookPath: join(home, ".cursor/settings.json"),
-      detect: () => existsSync(join(home, ".cursor"))
-    },
-    {
-      name: "windsurf",
-      skillPath: join(home, ".windsurf/commands/init-memory.md"),
-      hookPath: join(home, ".windsurf/settings.json"),
-      detect: () => existsSync(join(home, ".windsurf"))
-    },
-    {
-      name: "cline",
-      skillPath: join(home, ".cline/commands/init-memory.md"),
-      hookPath: join(home, ".cline/settings.json"),
-      detect: () => existsSync(join(home, ".cline"))
-    }
-  ];
-
-  return environments.map(env => ({
-    name: env.name,
-    detected: env.detect(),
-    skillPath: env.skillPath,
-    hookPath: env.hookPath
-  }));
+function normalizePriority(value: unknown): MemoryPriority {
+  if (value === undefined || value === null) return DEFAULT_PRIORITY;
+  if (!isValidPriority(value)) {
+    throw new Error("priority 必须是 0、1 或 2");
+  }
+  return value;
 }
 
-function generateStopHookScript(namespace: string): string {
-  return `#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""
-Stop Hook - Save important information before session ends
-"""
-import json
-import sys
-
-def main():
-    """Output hook result that reminds AI to save important info."""
-
-    context = """💾 会话结束协议
-
-在结束前，请检查本次对话中是否有需要保存的重要信息：
-- 用户的新偏好或习惯
-- 项目相关的重要决策
-- 需要记住的上下文
-
-如果有，使用 mcp__xmszm-memory__save 工具保存，格式：
-- namespace: "${namespace}"
-- key: "category/具体名称"（如 "preference/工具偏好"）
-- content: 具体内容
-- disclosure: 触发条件（如 "当需要使用工具时"）
-
-如果没有重要信息需要保存，无需操作。"""
-
-    result = {
-        "hookSpecificOutput": {
-            "hookEventName": "Stop",
-            "additionalContext": context,
-        }
-    }
-
-    print(json.dumps(result, ensure_ascii=False), flush=True)
-
-if __name__ == "__main__":
-    main()
-`;
+function normalizeTags(value: unknown): string[] {
+  if (value === undefined || value === null) return [...DEFAULT_TAGS];
+  if (!Array.isArray(value) || value.some((tag) => typeof tag !== "string")) {
+    throw new Error("tags 必须是字符串数组");
+  }
+  return value;
 }
 
-function generateHookScript(namespace: string): string {
-  return `#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""
-Session Start Hook - Auto-load memory
-"""
-from __future__ import annotations
-
-# IMPORTANT: Suppress all warnings FIRST
-import warnings
-warnings.filterwarnings("ignore")
-
-import json
-import sys
-
-# Force UTF-8 on stdin/stdout/stderr on Windows
-if sys.platform.startswith("win"):
-    import io as _io
-    for _stream_name in ("stdin", "stdout", "stderr"):
-        _stream = getattr(sys, _stream_name, None)
-        if _stream is None:
-            continue
-        if hasattr(_stream, "reconfigure"):
-            try:
-                _stream.reconfigure(encoding="utf-8", errors="replace")
-            except Exception:
-                pass
-        elif hasattr(_stream, "detach"):
-            try:
-                setattr(sys, _stream_name, _io.TextIOWrapper(_stream.detach(), encoding="utf-8", errors="replace"))
-            except Exception:
-                pass
-
-def main():
-    """Output hook result that triggers memory loading."""
-
-    context = """⚠️ 系统初始化要求
-
-在回复用户之前,你必须先执行以下操作:
-
-mcp__xmszm-memory__load_session(namespace="${namespace}")
-
-这不是可选操作,是必须执行的初始化步骤。
-执行后会加载用户的身份设定、偏好和上下文信息。
-
-请立即调用该工具,然后根据返回的信息调整你的回复方式。"""
-
-    result = {
-        "hookSpecificOutput": {
-            "hookEventName": "SessionStart",
-            "additionalContext": context,
-        }
-    }
-
-    print(json.dumps(result, ensure_ascii=False), flush=True)
-
-if __name__ == "__main__":
-    main()
-`;
+function normalizeSource(value: unknown): string {
+  if (value === undefined || value === null || value === "") {
+    return DEFAULT_SOURCE;
+  }
+  if (typeof value !== "string") {
+    throw new Error("source 必须是字符串");
+  }
+  return value;
 }
 
-function generateHookConfig(envName: string): any {
-  // Codex uses .codex/hooks.json, different from other environments
-  if (envName === "codex") {
-    // Use 'python' on Windows, 'python3' on Unix
-    const pythonCmd = process.platform === "win32" ? "python" : "python3";
-    return {
-      hooks: {
-        SessionStart: [
-          {
-            matcher: "startup",
-            hooks: [
-              {
-                type: "command",
-                command: `${pythonCmd} -X utf8 .codex/hooks/session-start.py`,
-                timeout: 30
-              }
-            ]
-          },
-          {
-            matcher: "clear",
-            hooks: [
-              {
-                type: "command",
-                command: `${pythonCmd} -X utf8 .codex/hooks/session-start.py`,
-                timeout: 30
-              }
-            ]
-          },
-          {
-            matcher: "compact",
-            hooks: [
-              {
-                type: "command",
-                command: `${pythonCmd} -X utf8 .codex/hooks/session-start.py`,
-                timeout: 30
-              }
-            ]
-          }
-        ]
-      }
-    };
+function normalizeStoredMemory(record: unknown): LoadedMemory | null {
+  if (!record || typeof record !== "object" || Array.isArray(record)) {
+    return null;
   }
 
-  // Other environments use settings.json
+  const input = record as Record<string, unknown>;
+  if (
+    typeof input.uri !== "string" ||
+    typeof input.content !== "string" ||
+    typeof input.disclosure !== "string" ||
+    typeof input.createdAt !== "string" ||
+    typeof input.updatedAt !== "string"
+  ) {
+    return null;
+  }
+
+  const deletedAt =
+    typeof input.deletedAt === "string" ? { deletedAt: input.deletedAt } : {};
+
   return {
-    hooks: {
-      SessionStart: [
-        {
-          matcher: "startup",
-          hooks: [
-            {
-              type: "command",
-              command: "python .claude/hooks/session-start.py",
-              timeout: 5
-            }
-          ]
-        },
-        {
-          matcher: "clear",
-          hooks: [
-            {
-              type: "command",
-              command: "python .claude/hooks/session-start.py",
-              timeout: 5
-            }
-          ]
-        },
-        {
-          matcher: "compact",
-          hooks: [
-            {
-              type: "command",
-              command: "python .claude/hooks/session-start.py",
-              timeout: 5
-            }
-          ]
-        }
-      ]
-    }
+    uri: input.uri,
+    content: input.content,
+    disclosure: input.disclosure,
+    priority: isValidPriority(input.priority) ? input.priority : DEFAULT_PRIORITY,
+    tags:
+      Array.isArray(input.tags) && input.tags.every((tag) => typeof tag === "string")
+        ? input.tags
+        : [...DEFAULT_TAGS],
+    source: typeof input.source === "string" && input.source !== "" ? input.source : DEFAULT_SOURCE,
+    createdAt: input.createdAt,
+    updatedAt: input.updatedAt,
+    ...deletedAt,
   };
 }
 
-function mergeHookConfig(existingPath: string, newHook: any): any {
-  let existing: any = {};
-  if (existsSync(existingPath)) {
-    try {
-      existing = JSON.parse(readFileSync(existingPath, "utf-8"));
-    } catch {
-      existing = {};
-    }
+function requireString(value: unknown, name: string): string {
+  if (typeof value !== "string" || value.trim() === "") {
+    throw new Error(`${name} 必须是非空字符串`);
+  }
+  return value;
+}
+
+function activeMemories(memories: LoadedMemory[]): LoadedMemory[] {
+  return memories.filter(
+    (memory) => typeof memory.uri === "string" && !memory.deletedAt
+  );
+}
+
+function findActive(memories: LoadedMemory[], uri: string): LoadedMemory | undefined {
+  return activeMemories(memories).find((memory) => memory.uri === uri);
+}
+
+function disclosurePreview(disclosure: string): string {
+  if (!disclosure) return "";
+  return disclosure.length > 80 ? `${disclosure.slice(0, 77)}...` : disclosure;
+}
+
+function contentPreview(content: string): string {
+  return content.length > 180 ? `${content.slice(0, 177)}...` : content;
+}
+
+function formatMemory(memory: LoadedMemory): string {
+  const tags = memory.tags.length ? memory.tags.join(", ") : "[]";
+  const disclosure = disclosurePreview(memory.disclosure);
+  const disclosureLine = disclosure ? `\n  disclosure: ${disclosure}` : "";
+  return [
+    `uri: ${memory.uri}`,
+    `priority: ${memory.priority}`,
+    `tags: ${tags}`,
+    `source: ${memory.source}`,
+    `createdAt: ${memory.createdAt}`,
+    `updatedAt: ${memory.updatedAt}`,
+    `${disclosureLine}`,
+    `content:\n${memory.content}`,
+  ]
+    .filter((line) => line !== "")
+    .join("\n");
+}
+
+function formatSearchHit(memory: LoadedMemory): string {
+  const tags = memory.tags.length ? memory.tags.join(", ") : "[]";
+  const disclosure = disclosurePreview(memory.disclosure) || "(none)";
+  return [
+    `• uri: ${memory.uri}`,
+    `  priority: ${memory.priority}; tags: ${tags}; source: ${memory.source}`,
+    `  disclosure: ${disclosure}`,
+    `  content: ${contentPreview(memory.content)}`,
+  ].join("\n");
+}
+
+function getUpdateFields(fields: unknown): UpdateFields {
+  if (!fields || typeof fields !== "object" || Array.isArray(fields)) {
+    throw new Error("fields 必须是对象");
   }
 
-  const merged = { ...existing };
-  merged.hooks = merged.hooks || {};
-  merged.hooks.SessionStart = newHook.hooks.SessionStart;
-  // Remove Stop hook if it exists
-  delete merged.hooks.Stop;
+  const input = fields as Record<string, unknown>;
+  const update: UpdateFields = {};
 
-  return merged;
-}
-
-function generateSkillTemplate(namespace: string, version: string): string {
-  return `# 初始化记忆
-
-🎯 **加载用户记忆设定**
-
-## 使用方式
-
-每次新会话开始时，输入：
-
-\`\`\`
-/init-memory
-\`\`\`
-
-或者直接说:"请加载我的记忆"
-
-## 功能
-
-一次性加载所有触发记忆：
-
-\`\`\`
-mcp__xmszm-memory__load_session(namespace="${namespace}")
-\`\`\`
-
-## 返回内容
-
-- 所有带触发条件的记忆的完整内容
-- 身份设定、偏好、项目上下文等
-
-## 应用记忆
-
-根据返回内容确认：
-- ✅ 身份角色
-- ✅ 称呼方式
-- ✅ 工具偏好
-- ✅ 项目设定
-
----
-Generated: ${new Date().toISOString()}
-Namespace: ${namespace}
-Version: ${version}
-`;
-}
-
-function generateMCPConfig(envName: string): any {
-  // Get the global package installation path
-  const packageName = "@xmszm/memory";
-
-  return {
-    mcpServers: {
-      "xmszm-memory": {
-        command: "npx",
-        args: ["-y", packageName]
-      }
+  if ("content" in input) update.content = requireString(input.content, "fields.content");
+  if ("disclosure" in input) {
+    if (typeof input.disclosure !== "string") {
+      throw new Error("fields.disclosure 必须是字符串");
     }
-  };
-}
-
-function getMCPConfigPath(envName: string): string | null {
-  const home = homedir();
-
-  // Different environments may use different MCP config paths
-  switch (envName) {
-    case "codex":
-      return join(home, ".codex/mcp.json");
-    case "claude-code":
-      return join(home, ".claude/mcp.json");
-    case "cursor":
-      return join(home, ".cursor/mcp.json");
-    case "windsurf":
-      return join(home, ".windsurf/mcp.json");
-    case "cline":
-      return join(home, ".cline/mcp.json");
-    default:
-      return null;
+    update.disclosure = input.disclosure;
   }
-}
+  if ("priority" in input) update.priority = normalizePriority(input.priority);
+  if ("tags" in input) update.tags = normalizeTags(input.tags);
+  if ("source" in input) update.source = normalizeSource(input.source);
 
-function mergeMCPConfig(existingPath: string, newConfig: any): any {
-  let existing: any = {};
-  if (existsSync(existingPath)) {
-    try {
-      existing = JSON.parse(readFileSync(existingPath, "utf-8"));
-    } catch {
-      existing = {};
-    }
+  if (Object.keys(update).length === 0) {
+    throw new Error("fields 至少需要包含 content、disclosure、priority、tags 或 source 之一");
   }
 
-  const merged = { ...existing };
-  merged.mcpServers = merged.mcpServers || {};
-  merged.mcpServers["xmszm-memory"] = newConfig.mcpServers["xmszm-memory"];
-
-  return merged;
+  return update;
 }
 
-function deployToEnvironment(
-  env: AIEnvironment,
-  namespace: string,
-  includeHook: boolean,
-  version: string
-): { success: boolean; message: string; error?: string } {
-  try {
-    // 1. Deploy skill
-    mkdirSync(dirname(env.skillPath), { recursive: true });
-    const skillContent = generateSkillTemplate(namespace, version);
-    writeFileSync(env.skillPath, skillContent, "utf-8");
-
-    let hookMessage = "";
-    let mcpMessage = "";
-
-    // 2. Deploy MCP config
-    const mcpConfigPath = getMCPConfigPath(env.name);
-    if (mcpConfigPath) {
-      try {
-        const mcpConfig = generateMCPConfig(env.name);
-        const merged = mergeMCPConfig(mcpConfigPath, mcpConfig);
-        mkdirSync(dirname(mcpConfigPath), { recursive: true });
-        writeFileSync(mcpConfigPath, JSON.stringify(merged, null, 2), "utf-8");
-        mcpMessage = " + mcp-config";
-      } catch (mcpErr: any) {
-        console.error(`[xmszm-memory] Warning: MCP config deployment failed for ${env.name}:`, mcpErr.message);
-        // Don't fail the whole deployment, just warn
-      }
-    }
-
-    // 3. Deploy hook (SessionStart auto-loading only)
-    if (includeHook) {
-      try {
-        // Deploy SessionStart hook script
-        const configDir = dirname(env.hookPath); // ~/.claude or ~/.codex
-        const sessionStartPath = join(configDir, "hooks", "session-start.py");
-        mkdirSync(dirname(sessionStartPath), { recursive: true });
-        const sessionStartScript = generateHookScript(namespace);
-        writeFileSync(sessionStartPath, sessionStartScript, "utf-8");
-
-        // Deploy hook config (SessionStart only)
-        mkdirSync(dirname(env.hookPath), { recursive: true });
-        const hookConfig = generateHookConfig(env.name);
-        const merged = mergeHookConfig(env.hookPath, hookConfig);
-        writeFileSync(env.hookPath, JSON.stringify(merged, null, 2), "utf-8");
-
-        hookMessage = " + auto-load hook";
-      } catch (hookErr: any) {
-        return {
-          success: true,
-          message: `⚠️ ${env.name}: skill${mcpMessage} 已部署，但 hook 部署失败`,
-          error: hookErr.message
-        };
-      }
-    }
-
-    return {
-      success: true,
-      message: `✅ ${env.name}: skill${mcpMessage}${hookMessage} 已部署`
-    };
-  } catch (err: any) {
-    if (err.code === "EACCES") {
-      return {
-        success: false,
-        message: `❌ ${env.name}: 权限不足`,
-        error: "请检查文件权限"
-      };
-    }
-    if (err.code === "ENOSPC") {
-      return {
-        success: false,
-        message: `❌ ${env.name}: 磁盘空间不足`,
-        error: err.message
-      };
-    }
-    return {
-      success: false,
-      message: `❌ ${env.name}: ${err.message}`,
-      error: err.stack
-    };
-  }
-}
-
-// ── MCP Server ────────────────────────────────────────
+// MCP Server
 const server = new Server(
   { name: "xmszm-memory", version: "1.0.0" },
   { capabilities: { tools: {} } }
@@ -497,120 +240,121 @@ const server = new Server(
 server.setRequestHandler(ListToolsRequestSchema, async () => ({
   tools: [
     {
-      name: "save",
+      name: "create",
       description:
-        "保存一条记忆。namespace 区分用户。key 类似文件路径，如 project/密码规范",
+        "Create a new URI-only memory. Requires exact namespace and uri. Refuses overwrite when uri already exists; use update to modify an existing memory. Default priority=2, tags=[], source=assistant_inferred.",
       inputSchema: {
         type: "object",
         properties: {
-          namespace: { type: "string", description: "用户命名空间，如 admin、alice" },
-          key: { type: "string", description: "记忆的 key，如 project/密码规范" },
-          content: { type: "string", description: "记忆内容" },
+          namespace: { type: "string", description: "User namespace, e.g. admin or alice" },
+          uri: { type: "string", description: "Stable memory URI, e.g. memory://admin/project/password-policy" },
+          content: { type: "string", description: "Full memory content" },
           disclosure: {
             type: "string",
-            description: "触发条件，如「当要创建密码时」",
+            description: "When this memory should be considered relevant",
+          },
+          priority: {
+            type: "number",
+            enum: [0, 1, 2],
+            description: "0 highest, 1 normal, 2 low/default",
+          },
+          tags: {
+            type: "array",
+            items: { type: "string" },
+            description: "Tags used for search and grouping",
+          },
+          source: {
+            type: "string",
+            description: "Enum-like source label; default assistant_inferred",
           },
         },
-        required: ["namespace", "key", "content"],
+        required: ["namespace", "uri", "content", "disclosure"],
+      },
+    },
+    {
+      name: "update",
+      description:
+        "Update an existing active memory by exact uri. Use only when you already know the URI. Does not change createdAt. Accepts fields: content, disclosure, priority, tags, source.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          namespace: { type: "string" },
+          uri: { type: "string", description: "Exact existing memory URI" },
+          fields: {
+            type: "object",
+            properties: {
+              content: { type: "string" },
+              disclosure: { type: "string" },
+              priority: { type: "number", enum: [0, 1, 2] },
+              tags: { type: "array", items: { type: "string" } },
+              source: { type: "string" },
+            },
+            additionalProperties: false,
+            description: "Fields to modify. Do not include uri, createdAt, updatedAt, or deletedAt.",
+          },
+        },
+        required: ["namespace", "uri", "fields"],
       },
     },
     {
       name: "read",
-      description: "用精确的 key 读取一条记忆。调用前请确保你知道确切的 key（先用 search 查到 key 再调这里）。",
+      description:
+        "Read one active memory by exact URI. Do not guess URIs. If URI is unknown, call search first; use list only for prefix browsing.",
       inputSchema: {
         type: "object",
         properties: {
           namespace: { type: "string" },
-          key: { type: "string" },
+          uri: { type: "string", description: "Exact memory URI returned by search/list" },
         },
-        required: ["namespace", "key"],
+        required: ["namespace", "uri"],
       },
     },
     {
       name: "search",
-      description: "【主入口】按关键词搜索某用户的记忆。不知道具体 key 时应该先调这个来查找，而不是猜 key 去调用 read。",
+      description:
+        "Main entry when URI is unknown. Search active memories by keyword across uri, content, disclosure, tags, and source. Returns URI plus priority/tags/source/disclosure preview so you can decide whether to read.",
       inputSchema: {
         type: "object",
         properties: {
           namespace: { type: "string" },
-          query: { type: "string", description: "关键词" },
+          query: { type: "string", description: "Non-empty keyword or phrase" },
         },
         required: ["namespace", "query"],
       },
     },
     {
-      name: "delete",
-      description: "删除一条记忆",
+      name: "list",
+      description:
+        "Browse active memories by URI. Optional prefix filters by URI prefix. Use search for keyword discovery; use read/update/delete only after you have the exact URI.",
       inputSchema: {
         type: "object",
         properties: {
           namespace: { type: "string" },
-          key: { type: "string" },
-        },
-        required: ["namespace", "key"],
-      },
-    },
-    {
-      name: "get_triggered",
-      description:
-        "返回所有带 disclosure（触发条件）的记忆的 key 和触发条件，不返回 content。用于对话开始时快速了解哪些记忆需要触发。",
-      inputSchema: {
-        type: "object",
-        properties: {
-          namespace: { type: "string", description: "用户命名空间，如 xmszm" },
+          prefix: { type: "string", description: "Optional URI prefix filter" },
         },
         required: ["namespace"],
       },
     },
     {
-      name: "load_session",
+      name: "delete",
       description:
-        "【会话启动专用】一次性加载所有带触发条件的记忆的完整内容。等同于 get_triggered + 批量 read，但只需一次调用。会话开始时优先使用此工具。",
+        "Soft-delete an active memory by exact URI. Does not remove the JSON record; it sets deletedAt. Use search/list first if URI is unknown.",
       inputSchema: {
         type: "object",
         properties: {
-          namespace: { type: "string", description: "用户命名空间，如 xmszm" },
+          namespace: { type: "string" },
+          uri: { type: "string", description: "Exact memory URI" },
         },
-        required: ["namespace"],
+        required: ["namespace", "uri"],
       },
     },
     {
       name: "list_namespaces",
-      description: "列出所有 namespace。注意：查询到 namespace 后，你必须再调用 search(该namespace, query) 才能获取记忆内容。只调 list_namespaces 不会返回任何记忆内容。",
+      description:
+        "List all namespaces only. This does not return memories. After choosing a namespace, call search(namespace, query) for memory content or list(namespace, prefix) for URI prefix browsing.",
       inputSchema: {
         type: "object",
         properties: {},
-      },
-    },
-    {
-      name: "init",
-      description: "初始化记忆系统：自动部署 /init-memory skill 和 SessionStart hook 到当前或指定的 AI 环境。一次配置，自动加载。",
-      inputSchema: {
-        type: "object",
-        properties: {
-          namespace: {
-            type: "string",
-            description: "用户命名空间，如 xmszm"
-          },
-          target: {
-            type: "string",
-            enum: ["auto", "claude-code", "cursor", "windsurf", "cline", "all"],
-            description: "目标环境。auto=自动检测当前环境，all=部署到所有检测到的环境"
-          },
-          includeHook: {
-            type: "boolean",
-            description: "是否部署 SessionStart hook（自动加载记忆）。默认 true"
-          }
-        },
-        required: ["namespace"]
-      },
-    },
-    {
-      name: "reset_init",
-      description: "重置自动初始化标记，允许下次启动时重新执行自动部署。用于测试或重新配置。",
-      inputSchema: {
-        type: "object",
-        properties: {}
       },
     },
   ],
@@ -620,112 +364,157 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   const { name, arguments: args } = request.params;
 
   switch (name) {
-    case "save": {
-      const { namespace, key, content, disclosure = "" } = args as any;
-      const memories = load(namespace);
-      const existing = memories.find((m) => m.key === key);
+    case "create": {
+      const {
+        namespace,
+        uri,
+        content,
+        disclosure,
+        priority,
+        tags,
+        source,
+      } = args as Record<string, unknown>;
+      const ns = requireString(namespace, "namespace");
+      const memoryUri = requireString(uri, "uri");
+      const memoryContent = requireString(content, "content");
+      const memoryDisclosure =
+        typeof disclosure === "string" ? disclosure : requireString(disclosure, "disclosure");
+
+      const memories = load(ns);
+      const existing = memories.find((memory) => memory.uri === memoryUri);
       if (existing) {
-        existing.content = content;
-        existing.disclosure = disclosure;
-        existing.updatedAt = now();
-      } else {
-        memories.push({
-          key,
-          content,
-          disclosure,
-          createdAt: now(),
-          updatedAt: now(),
-        });
+        const state = existing.deletedAt ? "已软删除但仍存在" : "已存在";
+        return {
+          content: [
+            {
+              type: "text",
+              text: `${state} [${ns}] ${memoryUri}；create 不会覆盖，请使用 update 修改。`,
+            },
+          ],
+        };
       }
-      save(namespace, memories);
+
+      const timestamp = now();
+      memories.push({
+        uri: memoryUri,
+        content: memoryContent,
+        disclosure: memoryDisclosure,
+        priority: normalizePriority(priority),
+        tags: normalizeTags(tags),
+        source: normalizeSource(source),
+        createdAt: timestamp,
+        updatedAt: timestamp,
+      });
+      writeNamespace(ns, memories);
       return {
-        content: [{ type: "text", text: `已保存 [${namespace}] ${key}` }],
+        content: [{ type: "text", text: `已创建 [${ns}] ${memoryUri}` }],
+      };
+    }
+
+    case "update": {
+      const { namespace, uri, fields } = args as Record<string, unknown>;
+      const ns = requireString(namespace, "namespace");
+      const memoryUri = requireString(uri, "uri");
+      const update = getUpdateFields(fields);
+      const memories = load(ns);
+      const memory = findActive(memories, memoryUri);
+
+      if (!memory) {
+        return {
+          content: [{ type: "text", text: `未找到或已删除 [${ns}] ${memoryUri}` }],
+        };
+      }
+
+      Object.assign(memory, update, { updatedAt: now() });
+      writeNamespace(ns, memories);
+      return {
+        content: [{ type: "text", text: `已更新 [${ns}] ${memoryUri}` }],
       };
     }
 
     case "read": {
-      const { namespace, key } = args as any;
-      const memories = load(namespace);
-      const m = memories.find((m) => m.key === key);
-      if (!m) {
+      const { namespace, uri } = args as Record<string, unknown>;
+      const ns = requireString(namespace, "namespace");
+      const memoryUri = requireString(uri, "uri");
+      const memories = load(ns);
+      const memory = findActive(memories, memoryUri);
+      if (!memory) {
         return {
-          content: [{ type: "text", text: `未找到 [${namespace}] ${key}` }],
+          content: [{ type: "text", text: `未找到或已删除 [${ns}] ${memoryUri}` }],
         };
       }
-      const d = m.disclosure ? `\n[触发: ${m.disclosure}]` : "";
       return {
-        content: [{ type: "text", text: `${m.content}${d}` }],
+        content: [{ type: "text", text: formatMemory(memory) }],
       };
     }
 
     case "search": {
-      const { namespace, query } = args as any;
-      const memories = load(namespace);
-      const q = query.toLowerCase();
-      const hits = memories.filter(
-        (m) =>
-          m.key.toLowerCase().includes(q) ||
-          m.content.toLowerCase().includes(q) ||
-          m.disclosure.toLowerCase().includes(q)
-      );
+      const { namespace, query } = args as Record<string, unknown>;
+      const ns = requireString(namespace, "namespace");
+      const memoryQuery = requireString(query, "query");
+      const q = memoryQuery.toLowerCase();
+      const hits = activeMemories(load(ns)).filter((memory) => {
+        const searchable = [
+          memory.uri,
+          memory.content,
+          memory.disclosure,
+          memory.tags.join(" "),
+          memory.source,
+        ]
+          .join("\n")
+          .toLowerCase();
+        return searchable.includes(q);
+      });
+
       if (hits.length === 0) {
         return {
-          content: [{ type: "text", text: `[${namespace}] 没有找到「${query}」` }],
+          content: [{ type: "text", text: `[${ns}] 没有找到「${memoryQuery}」` }],
         };
       }
-      const text = hits
-        .slice(0, 10)
-        .map((m) => {
-          const d = m.disclosure ? ` [${m.disclosure}]` : "";
-          return `• ${m.key}${d}\n  ${m.content.slice(0, 150)}`;
-        })
-        .join("\n\n");
+
+      const text = hits.slice(0, 10).map(formatSearchHit).join("\n\n");
+      return { content: [{ type: "text", text }] };
+    }
+
+    case "list": {
+      const { namespace, prefix } = args as Record<string, unknown>;
+      const ns = requireString(namespace, "namespace");
+      const uriPrefix = typeof prefix === "string" ? prefix : "";
+      const memories = activeMemories(load(ns))
+        .filter((memory) => memory.uri.startsWith(uriPrefix))
+        .sort((a, b) => a.uri.localeCompare(b.uri));
+
+      if (memories.length === 0) {
+        const suffix = uriPrefix ? ` with prefix ${uriPrefix}` : "";
+        return {
+          content: [{ type: "text", text: `[${ns}] 没有 active memories${suffix}` }],
+        };
+      }
+
+      const text = memories.slice(0, 50).map(formatSearchHit).join("\n\n");
       return { content: [{ type: "text", text }] };
     }
 
     case "delete": {
-      const { namespace, key } = args as any;
-      const memories = load(namespace);
-      const filtered = memories.filter((m) => m.key !== key);
-      save(namespace, filtered);
+      const { namespace, uri } = args as Record<string, unknown>;
+      const ns = requireString(namespace, "namespace");
+      const memoryUri = requireString(uri, "uri");
+      const memories = load(ns);
+      const memory = findActive(memories, memoryUri);
+
+      if (!memory) {
+        return {
+          content: [{ type: "text", text: `未找到或已删除 [${ns}] ${memoryUri}` }],
+        };
+      }
+
+      const timestamp = now();
+      memory.deletedAt = timestamp;
+      memory.updatedAt = timestamp;
+      writeNamespace(ns, memories);
       return {
-        content: [{ type: "text", text: `已删除 [${namespace}] ${key}` }],
+        content: [{ type: "text", text: `已软删除 [${ns}] ${memoryUri}` }],
       };
-    }
-
-    case "get_triggered": {
-      const { namespace } = args as any;
-      const memories = load(namespace);
-      const triggered = memories.filter((m) => m.disclosure);
-      if (triggered.length === 0) {
-        return {
-          content: [{ type: "text", text: `[${namespace}] 没有带触发条件的记忆` }],
-        };
-      }
-      const text = triggered
-        .map((m) => `• ${m.key} [${m.disclosure}]`)
-        .join("\n");
-      return { content: [{ type: "text", text }] };
-    }
-
-    case "load_session": {
-      const { namespace } = args as any;
-      const memories = load(namespace);
-      const triggered = memories.filter((m) => m.disclosure);
-      if (triggered.length === 0) {
-        return {
-          content: [{ type: "text", text: `[${namespace}] 没有带触发条件的记忆` }],
-        };
-      }
-      const text = triggered
-        .map((m) => {
-          const header = `━━━ ${m.key} ━━━\n触发: ${m.disclosure}\n`;
-          const content = m.content;
-          const footer = `\n更新: ${m.updatedAt}\n`;
-          return header + content + footer;
-        })
-        .join("\n");
-      return { content: [{ type: "text", text: `✅ 已加载 ${triggered.length} 条会话记忆：\n\n${text}` }] };
     }
 
     case "list_namespaces": {
@@ -736,8 +525,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       let names: string[] = [];
       try {
         names = readdirSync(DATA_DIR)
-          .filter((f) => f.endsWith(".json"))
-          .map((f) => `• ${f.replace(".json", "")}`);
+          .filter((file) => file.endsWith(".json"))
+          .map((file) => `• ${file.replace(".json", "")}`);
       } catch {
         names = [];
       }
@@ -751,198 +540,23 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       };
     }
 
-    case "init": {
-      const { namespace, target = "auto", includeHook = true } = args as any;
-      const version = "1.1.0"; // 从 package.json 读取更好，这里硬编码
-
-      // 1. 检测所有环境
-      const environments = detectEnvironments();
-      const detected = environments.filter(env => env.detected);
-
-      if (detected.length === 0) {
-        return {
-          content: [{
-            type: "text",
-            text: "❌ 未检测到支持的 AI 环境（Claude Code / Cursor / Windsurf / Cline）\n\n请确保至少安装了一个支持的 AI 环境。"
-          }]
-        };
-      }
-
-      // 2. 确定目标环境
-      let targets: AIEnvironment[] = [];
-
-      if (target === "all") {
-        targets = detected;
-      } else if (target === "auto") {
-        // 优先当前环境，否则第一个检测到的
-        targets = [detected[0]];
-      } else {
-        const found = detected.find(env => env.name === target);
-        if (!found) {
-          const detectedList = detected.map(e => `• ${e.name}`).join("\n");
-          return {
-            content: [{
-              type: "text",
-              text: `❌ 环境 ${target} 未检测到或不支持\n\n检测到的环境：\n${detectedList}`
-            }]
-          };
-        }
-        targets = [found];
-      }
-
-      // 3. 部署到目标环境
-      const results = targets.map(env =>
-        deployToEnvironment(env, namespace, includeHook, version)
-      );
-
-      // 4. 生成报告
-      const summary = results.map(r => r.message).join("\n");
-      const successCount = results.filter(r => r.success).length;
-      const hasErrors = results.some(r => r.error);
-
-      let errorDetails = "";
-      if (hasErrors) {
-        const errors = results.filter(r => r.error).map(r => `  ${r.error}`).join("\n");
-        errorDetails = `\n\n⚠️ 错误详情：\n${errors}`;
-      }
-
-      const report = `📦 记忆系统初始化完成
-
-${summary}
-
-📝 部署内容：
-• Skill 文件：/init-memory 命令
-${includeHook ? "• SessionStart Hook：会话开始时自动加载记忆" : ""}
-${includeHook ? "• Hook 配置：自动触发" : "• Hook 配置：未部署（需手动调用 /init-memory）"}
-
-🎯 工作流程：
-${includeHook ? "1. 会话开始 → 自动加载记忆 ✨" : "1. 手动输入 /init-memory 加载记忆"}
-${includeHook ? "2. 对话进行中 → AI 主动保存重要信息 💾" : "2. 手动保存记忆"}
-
-💡 提示：
-AI 会在对话中主动识别并保存重要信息（偏好、决策、上下文等）
-
-✨ ${successCount}/${targets.length} 个环境部署成功${errorDetails}`;
-
-      return {
-        content: [{ type: "text", text: report }]
-      };
-    }
-
-    case "reset_init": {
-      const markerFile = join(DATA_DIR, ".auto-init-done");
-
-      if (!existsSync(markerFile)) {
-        return {
-          content: [{
-            type: "text",
-            text: "ℹ️ 自动初始化标记不存在，无需重置。\n\n下次 MCP 服务器启动时会自动执行初始化。"
-          }]
-        };
-      }
-
-      try {
-        const { unlinkSync } = await import("fs");
-        unlinkSync(markerFile);
-        return {
-          content: [{
-            type: "text",
-            text: "✅ 自动初始化标记已重置\n\n下次 MCP 服务器重启时将重新执行自动部署。"
-          }]
-        };
-      } catch (err: any) {
-        return {
-          content: [{
-            type: "text",
-            text: `❌ 重置失败: ${err.message}`
-          }]
-        };
-      }
-    }
-
     default:
       throw new Error(`Unknown tool: ${name}`);
   }
 });
 
-// ── Auto-Init on First Run ───────────────────────────
-async function autoInitIfNeeded() {
-  const home = homedir();
-  const markerFile = join(DATA_DIR, ".auto-init-done");
-
-  // 如果已经初始化过，跳过
-  if (existsSync(markerFile)) {
-    return;
-  }
-
-  console.error("[xmszm-memory] First run detected, auto-initializing...");
-
-  // 检测环境
-  const environments = detectEnvironments();
-  const detected = environments.filter(env => env.detected);
-
-  if (detected.length === 0) {
-    console.error("[xmszm-memory] No AI environment detected, skipping auto-init");
-    return;
-  }
-
-  // 尝试从已有数据中获取 namespace
-  let defaultNamespace = "user"; // 默认值
-
-  try {
-    if (existsSync(DATA_DIR)) {
-      const { readdirSync } = await import("fs");
-      const files = readdirSync(DATA_DIR).filter(f => f.endsWith(".json"));
-      if (files.length > 0) {
-        // 使用第一个找到的 namespace
-        defaultNamespace = files[0].replace(".json", "");
-      }
-    }
-  } catch {
-    // 忽略错误，使用默认值
-  }
-
-  const version = "1.1.0";
-  const results: string[] = [];
-
-  // 部署到所有检测到的环境（包含 hook）
-  for (const env of detected) {
-    try {
-      const result = deployToEnvironment(env, defaultNamespace, true, version);
-      results.push(result.message);
-      console.error(`[xmszm-memory] ${result.message}`);
-    } catch (err: any) {
-      console.error(`[xmszm-memory] Failed to deploy to ${env.name}: ${err.message}`);
-    }
-  }
-
-  // 创建标记文件，避免重复初始化
-  try {
-    if (!existsSync(DATA_DIR)) mkdirSync(DATA_DIR, { recursive: true });
-    writeFileSync(markerFile, JSON.stringify({
-      initialized: new Date().toISOString(),
-      namespace: defaultNamespace,
-      environments: detected.map(e => e.name),
-      results
-    }, null, 2), "utf-8");
-    console.error("[xmszm-memory] Auto-init completed. Marker file created.");
-  } catch (err: any) {
-    console.error(`[xmszm-memory] Failed to create marker file: ${err.message}`);
-  }
-}
-
-// ── Main ──────────────────────────────────────────────
+// Main
 async function main() {
-  // 启动时自动初始化
-  await autoInitIfNeeded();
-
   const mode = process.argv[2] || "stdio";
 
   if (mode === "sse") {
     const port = parseInt(process.argv[3] || "8000", 10);
 
+    // Store the last transport for /messages.
+    let transport: SSEServerTransport | null = null;
+
     const httpServer = createServer(async (req, res) => {
-      // CORS headers
+      // CORS headers.
       res.setHeader("Access-Control-Allow-Origin", "*");
       res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
       res.setHeader("Access-Control-Allow-Headers", "Content-Type");
@@ -953,26 +567,6 @@ async function main() {
         return;
       }
 
-      const url = new URL(req.url || "/", `http://${req.headers.host}`);
-
-      if (url.pathname === "/sse") {
-        const transport = new SSEServerTransport("/messages", res);
-        await server.connect(transport);
-        req.on("close", () => {
-          // client disconnected
-        });
-      } else if (url.pathname === "/messages") {
-        await transport?.handlePostMessage(req, res);
-      } else {
-        res.writeHead(404);
-        res.end("Not found");
-      }
-    });
-
-    // Store the last transport for /messages
-    let transport: SSEServerTransport | null = null;
-
-    httpServer.on("request", async (req, res) => {
       const url = new URL(req.url || "/", `http://${req.headers.host}`);
 
       if (url.pathname === "/sse") {

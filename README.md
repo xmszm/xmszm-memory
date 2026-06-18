@@ -4,69 +4,6 @@ Personal MCP memory server. Multi-user, file-backed, cross-platform.
 
 Each user gets an isolated namespace. Memories persist across sessions within the namespace.
 
-## Quick Start
-
-### 1. Install MCP Server
-
-```bash
-# Add to your MCP client config (claude.json, cursor settings, etc.)
-{
-  "mcpServers": {
-    "xmszm-memory": {
-      "command": "npx",
-      "args": ["-y", "@xmszm/memory"]
-    }
-  }
-}
-```
-
-### 2. Restart Your AI Environment
-
-**That's it!** 🎉
-
-On first run, the MCP server will:
-- ✅ Auto-detect your AI environment (Claude Code / Cursor / Windsurf / Cline)
-- ✅ Deploy `/init-memory` skill
-- ✅ Deploy SessionStart hook for automatic loading
-- ✅ Ready to use
-
-### 3. Automatic Memory Loading
-
-**Every new conversation, memories load automatically!** ✨
-
-The SessionStart hook triggers on session start and instructs the AI to call `load_session`, loading:
-- Your identity and role
-- Preferences and habits
-- Project context
-- All triggered memories
-
-**No manual action needed** - just start chatting!
-
----
-
-## How It Works
-
-**First Time Setup (Automatic)**:
-1. You add MCP server to config and restart
-2. MCP detects it's the first run
-3. Auto-deploys:
-   - `/init-memory` skill to `~/.claude/commands/`
-   - SessionStart hook script to `~/.claude/hooks/session-start.py`
-   - Hook configuration to `~/.claude/settings.json`
-4. Done!
-
-**Every Session After**:
-- New conversation starts
-- SessionStart hook runs automatically
-- Hook outputs `hookSpecificOutput` with instruction
-- AI receives context: "call load_session immediately"
-- Memories load seamlessly
-- AI greets you with proper context
-
-**Inspired by**: [Trellis](https://github.com/mindfold-ai/Trellis) - proven SessionStart hook pattern
-
----
-
 ## Usage
 
 ### Requirements
@@ -128,70 +65,54 @@ Most MCP-compatible clients accept the same format:
 }
 ```
 
+## Memory Model
+
+Memories are URI-only records. There is no `key` field and no key-based API.
+
+```ts
+interface Memory {
+  uri: string;
+  content: string;
+  disclosure: string;
+  priority: 0 | 1 | 2; // default 2
+  tags: string[];      // default []
+  source: string;      // default "assistant_inferred"
+  createdAt: string;
+  updatedAt: string;
+  deletedAt?: string;  // set by delete()
+}
+```
+
+Deleted memories are soft-deleted with `deletedAt` and are excluded from `read`, `search`, and `list` by default.
+
 ## Tools
 
 | Tool | Description |
 |------|-------------|
-| `load_session(namespace)` | **【会话启动】** 一次性加载所有触发记忆的完整内容 |
-| `save(namespace, key, content, disclosure?)` | Save a memory |
-| `read(namespace, key)` | Read a memory |
-| `search(namespace, query)` | Search memories by keyword |
-| `delete(namespace, key)` | Delete a memory |
-| `get_triggered(namespace)` | 返回所有带触发条件的记忆（只返回 key + disclosure，不返回 content） |
-| `list_namespaces()` | List all users |
-| `init(namespace, target?, includeHook?)` | **【首次安装】** 手动部署 skill 和 hook 到指定环境（通常自动完成，无需手动调用） |
-| `reset_init()` | **【测试/重置】** 重置自动初始化标记，允许下次重新部署 |
+| `create(namespace, uri, content, disclosure, priority?, tags?, source?)` | Create a new memory. Refuses overwrite if `uri` already exists; use `update` to modify. |
+| `update(namespace, uri, fields)` | Update an existing active memory by exact URI without changing `createdAt`. `fields` can include `content`, `disclosure`, `priority`, `tags`, or `source`. |
+| `read(namespace, uri)` | Read one active memory by exact URI. Use only when the URI is already known. |
+| `search(namespace, query)` | Main entry when URI is unknown. Searches `uri`, `content`, `disclosure`, `tags`, and `source`. |
+| `list(namespace, prefix?)` | Browse active memories, optionally filtered by URI prefix. |
+| `delete(namespace, uri)` | Soft-delete one active memory by exact URI by setting `deletedAt`. |
+| `list_namespaces()` | List all namespaces only; it does not return memories. |
 
-### Auto-Initialization (Default Behavior)
+Recommended flow:
 
-**First run**: MCP server automatically detects your environment and deploys configuration.
-
-**What gets deployed**:
-- Skill file: `~/.claude/commands/init-memory.md` (or equivalent for your AI)
-- Hook script: `~/.claude/hooks/session-start.py`
-- Hook config: `~/.claude/settings.json` with SessionStart hook
-- Marker file: `~/.xmszm-memory/.auto-init-done` (prevents re-initialization)
-
-**Manual override**: Use `init()` tool if you need to:
-- Deploy to a different namespace
-- Deploy to specific environments only
-- Re-deploy after changing settings
-- Deploy without hooks (`includeHook: false`)
-
-### Usage Pattern
-
-**Every new conversation**:
-1. SessionStart hook runs automatically
-2. AI receives instruction to call `load_session`
-3. All triggered memories are loaded
-4. AI responds with proper context
-
-**No manual action needed!** ✨
-
-### Tool Details
-
-#### `init` - Manual Deployment (Optional)
-
-```typescript
-// Auto-detect and deploy to current environment (with hooks)
-init({ namespace: "xmszm" })
-
-// Deploy to all detected environments
-init({ namespace: "xmszm", target: "all" })
-
-// Deploy without auto-loading hook (manual /init-memory only)
-init({ namespace: "xmszm", includeHook: false })
-
-// Supported environments: claude-code, cursor, windsurf, cline
+```text
+Unknown URI -> search(namespace, query) -> read/update/delete(namespace, exactUri)
+Browse URI prefix -> list(namespace, prefix)
+Create new memory -> create(namespace, uri, ...)
+Modify existing memory -> update(namespace, uri, fields)
 ```
 
 ## Data
 
-Stored in `~/.xmszm/memory/` as one JSON file per namespace.
+Stored in `~/.xmszm-memory/` as one JSON file per namespace.
 
 ```bash
 # View all your memories
-cat ~/.xmszm/memory/admin.json
+cat ~/.xmszm-memory/admin.json
 ```
 
 ## License
